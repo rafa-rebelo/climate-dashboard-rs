@@ -1,0 +1,116 @@
+# ══════════════════════════════════════════════════════
+#  Configuração Central — Sistema Climático RS
+# ══════════════════════════════════════════════════════
+
+projeto:
+  nome: "Monitor Hidrometeorológico RS"
+  versao: "2.0"
+  estado_principal: "RS"
+  timezone: "America/Sao_Paulo"
+
+# Caminhos de dados
+dados:
+  raw: "data/raw"
+  processed: "data/processed"
+  forecasts: "data/forecasts"
+  geo: "data/geo"
+  db_path: "data/climate.duckdb"
+
+# Frequências de coleta
+coleta:
+  realtime_minutos: 10
+  qualidade_agua_minutos: 30
+  previsao_horas: 6
+
+# Rios críticos do RS com cotas de alerta
+rios:
+  Sinos:
+    cota_atencao_m: 3.5
+    cota_alerta_m: 4.5
+    cota_emergencia_m: 5.5
+    municipios_risco: ["São Leopoldo", "Novo Hamburgo", "Canoas", "Esteio"]
+  Taquari:
+    cota_atencao_m: 3.5
+    cota_alerta_m: 5.0
+    cota_emergencia_m: 7.0
+    municipios_risco: ["Lajeado", "Estrela", "Encantado", "Muçum", "Roca Sales"]
+  Jacuí:
+    cota_atencao_m: 5.0
+    cota_alerta_m: 7.0
+    cota_emergencia_m: 9.0
+    municipios_risco: ["Rio Pardo", "Santa Cruz do Sul", "Cachoeira do Sul"]
+  Guaíba:
+    cota_atencao_m: 2.5
+    cota_alerta_m: 3.0
+    cota_emergencia_m: 3.6
+    municipios_risco: ["Porto Alegre", "Eldorado do Sul", "Guaíba"]
+  Camaquã:
+    cota_atencao_m: 3.0
+    cota_alerta_m: 4.0
+    cota_emergencia_m: 5.0
+    municipios_risco: ["Camaquã", "São Lourenço do Sul"]
+  Lagoa_Patos:
+    cota_atencao_m: 1.2
+    cota_alerta_m: 1.5
+    cota_emergencia_m: 2.0
+    municipios_risco: ["Pelotas", "Rio Grande"]
+
+# Limiares de alerta por região
+alertas:
+  Serra_Gaucha:
+    rain_1h_critico_mm: 25
+    rain_24h_critico_mm: 80
+    rain_72h_critico_mm: 150
+  Vale_Taquari:
+    rain_1h_critico_mm: 20
+    rain_24h_critico_mm: 60
+    rain_72h_critico_mm: 120
+  Litoral_Norte:
+    rain_1h_critico_mm: 30
+    rain_24h_critico_mm: 80
+    rain_72h_critico_mm: 160
+  Campanha:
+    rain_1h_critico_mm: 15
+    rain_24h_critico_mm: 40
+    rain_72h_critico_mm: 80
+
+# Índices de instabilidade
+instabilidade:
+  cape_tempestade_j_kg: 1500
+  cape_severo_j_kg: 2500
+  lifted_index_instavel: -2
+  lifted_index_muito_instavel: -4
+  k_index_chuva: 30
+  k_index_tempestade: 40
+
+# Grade de pontos NWP para o RS (Open-Meteo)
+grade_nwp:
+  - {nome: "Porto Alegre",  lat: -30.03, lon: -51.23}
+  - {nome: "Caxias do Sul", lat: -29.16, lon: -51.18}
+  - {nome: "Pelotas",       lat: -31.77, lon: -52.34}
+  - {nome: "Santa Maria",   lat: -29.68, lon: -53.80}
+  - {nome: "Passo Fundo",   lat: -28.26, lon: -52.41}
+  - {nome: "Lajeado",       lat: -29.47, lon: -51.96}
+  - {nome: "São Leopoldo",  lat: -29.76, lon: -51.15}
+  - {nome: "Novo Hamburgo", lat: -29.68, lon: -51.13}
+  - {nome: "Ijuí",          lat: -28.39, lon: -53.91}
+  - {nome: "Bagé",          lat: -31.33, lon: -54.11}
+
+# Modelos ML
+modelos:
+  convlstm:
+    seq_len: 6
+    pred_len: 6
+    hidden_channels: [64, 64, 32]
+    saved_path: "models_saved/convlstm_v1.pt"
+  lstm_rios:
+    hidden_size: 128
+    num_layers: 3
+    dropout: 0.2
+    horizontes_h: [6, 12, 24]
+    mc_dropout_samples: 50
+    saved_paths:
+      Sinos:   "models_saved/lstm_sinos_v1.pt"
+      Taquari: "models_saved/lstm_taquari_v1.pt"
+      Jacuí:   "models_saved/lstm_jacui_v1.pt"
+      Guaíba:  "models_saved/lstm_guaiba_v1.pt"

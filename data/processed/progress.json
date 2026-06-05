@@ -1,0 +1,188 @@
+{
+  "meta": {
+    "gerado_em": "2026-06-05T23:13:39Z",
+    "versao": "2.0",
+    "projeto": "Monitor Hidrometeorológico RS",
+    "status_geral": "OPERACIONAL",
+    "banco_db": "data\\climate.duckdb",
+    "banco_size_mb": 5.76,
+    "banco_online": true,
+    "api_online": false
+  },
+  "banco_duckdb": {
+    "11_tabelas": {
+      "stations": {
+        "registros": 102,
+        "ultima_entrada": "2026-06-05 19:01:51"
+      },
+      "rain_readings": {
+        "registros": 1144,
+        "ultima_entrada": "2026-06-05 15:45:00"
+      },
+      "rain_accumulated": {
+        "registros": 3,
+        "ultima_entrada": "2026-06-05 18:53:16"
+      },
+      "forecasts": {
+        "registros": 1680,
+        "ultima_entrada": "2026-06-05 14:20:32"
+      },
+      "alerts_log": {
+        "registros": 0,
+        "ultima_entrada": "nunca"
+      },
+      "river_levels": {
+        "registros": 1171,
+        "ultima_entrada": "2026-06-05 15:45:00"
+      },
+      "river_status": {
+        "registros": 4,
+        "ultima_entrada": "2026-06-05 21:53:16"
+      },
+      "water_quality": {
+        "registros": 0,
+        "ultima_entrada": "nunca"
+      },
+      "model_metrics": {
+        "registros": 0,
+        "ultima_entrada": "nunca"
+      },
+      "river_ai_forecasts": {
+        "registros": 0,
+        "ultima_entrada": "nunca"
+      },
+      "wrf_hydro_results": {
+        "registros": 0,
+        "ultima_entrada": "nunca"
+      }
+    }
+  },
+  "coleta": {
+    "ANA_HidroWeb": {
+      "status": "✅ ATIVO",
+      "registros_river_levels": 1171,
+      "registros_rain_readings": 1144,
+      "ultima_leitura": "2026-06-05 15:45:00"
+    },
+    "INMET": {
+      "status": "✅ ATIVO",
+      "estacoes_inventariadas": 98,
+      "nota": "dados horários requerem IP brasileiro"
+    },
+    "Open_Meteo_NWP": {
+      "status": "✅ ATIVO",
+      "previsoes_disponiveis": 1470,
+      "localidades": 10,
+      "valido_ate": "2026-06-11 23:00:00"
+    }
+  },
+  "processamento": {
+    "rain_accumulator": {
+      "status": "✅ ATIVO",
+      "parquet": {
+        "exists": true,
+        "size_kb": 6.9,
+        "modified_at": "2026-06-05 21:53 UTC"
+      },
+      "estacoes_processadas": 3,
+      "max_rain_24h_mm": 0.2
+    },
+    "river_status_calculator": {
+      "status": "✅ ATIVO",
+      "parquet": {
+        "exists": true,
+        "size_kb": 5.3,
+        "modified_at": "2026-06-05 21:53 UTC"
+      },
+      "segmentos_calculados": 4
+    }
+  },
+  "rios_monitorados": {
+    "Guaíba": {
+      "nivel_m": 1.15,
+      "vazao_cms": null,
+      "ultima_leitura": "2026-06-05 13:00:00",
+      "status": "NORMAL",
+      "tendencia": "ESTAVEL"
+    },
+    "Jacuí": {
+      "nivel_m": 0.65,
+      "vazao_cms": 2.13,
+      "ultima_leitura": "2026-06-05 15:30:00",
+      "status": "NORMAL",
+      "tendencia": "ESTAVEL"
+    },
+    "Taquari": {
+      "nivel_m": 1.29,
+      "vazao_cms": 75.08,
+      "ultima_leitura": "2026-06-05 15:45:00",
+      "status": "NORMAL",
+      "tendencia": "DESCENDO"
+    }
+  },
+  "modelos_ml": {
+    "modelos_treinados": "0/5",
+    "arquivos": {
+      "convlstm_v1": {
+        "exists": false,
+        "size_kb": 0,
+        "modified_at": null
+      },
+      "lstm_sinos_v1": {
+        "exists": false,
+        "size_kb": 0,
+        "modified_at": null
+      },
+      "lstm_taquari_v1": {
+        "exists": false,
+        "size_kb": 0,
+        "modified_at": null
+      },
+      "lstm_jacui_v1": {
+        "exists": false,
+        "size_kb": 0,
+        "modified_at": null
+      },
+      "lstm_guaiba_v1": {
+        "exists": false,
+        "size_kb": 0,
+        "modified_at": null
+      }
+    },
+    "metricas_performance": {}
+  },
+  "previsoes_nwp": {
+    "localidades": 10,
+    "modelos": 1,
+    "total_horarios": 1470,
+    "valido_de": "2026-06-05 21:00:00",
+    "valido_ate": "2026-06-11 23:00:00",
+    "por_modelo": {
+      "openmeteo": 1470
+    }
+  },
+  "alertas": {
+    "ativos": 0,
+    "resolvidos": 0,
+    "total": 0,
+    "ultimo_em": "nunca",
+    "por_severidade": {}
+  },
+  "api_fastapi": {
+    "status": "❌ INATIVO",
+    "porta": 8765,
+    "endpoints": 8
+  },
+  "dashboard_streamlit": {
+    "status": "✅ DISPONÍVEL",
+    "porta": 8501,
+    "paginas": [
+      "Visão Geral",
+      "Rios",
+      "Chuva",
+      "Previsões",
+      "Alertas",
+      "Sistema"
+    ]
+  }
+}

@@ -1,0 +1,82 @@
+════════════════════════════════════════════════════════════
+  COMANDOS PARA EXECUTAR NO TERMINAL DO VSCODE
+  Cole cada bloco no terminal PowerShell do VSCode
+════════════════════════════════════════════════════════════
+
+━━━ BLOCO 1: Criar toda a estrutura de pastas ━━━━━━━━━━━━━
+
+New-Item -ItemType Directory -Force -Path @(
+  "src\collectors",
+  "src\processors",
+  "src\models",
+  "src\database",
+  "src\api\endpoints",
+  "src\alerts",
+  "src\dashboard\components",
+  "src\dashboard\utils",
+  "src\dashboard\assets",
+  "data\raw\radar_images",
+  "data\processed",
+  "data\forecasts",
+  "data\geo",
+  "config",
+  "models_saved",
+  "tests",
+  "docs",
+  ".github\workflows"
+)
+
+━━━ BLOCO 2: Criar arquivos __init__.py ━━━━━━━━━━━━━━━━━━━
+
+$packages = @(
+  "src",
+  "src\collectors",
+  "src\processors",
+  "src\models",
+  "src\database",
+  "src\api",
+  "src\api\endpoints",
+  "src\alerts",
+  "src\dashboard",
+  "src\dashboard\components",
+  "src\dashboard\utils",
+  "tests"
+)
+foreach ($pkg in $packages) {
+  New-Item -ItemType File -Force -Path "$pkg\__init__.py" | Out-Null
+}
+Write-Host "✅ __init__.py criados em todos os pacotes"
+
+━━━ BLOCO 3: Copiar arquivos de configuração ━━━━━━━━━━━━━━
+(após copiar os arquivos gerados para a pasta do projeto)
+
+Copy-Item "CLAUDE.md"         -Destination "."
+Copy-Item "requirements.txt"  -Destination "."
+Copy-Item ".env.example"      -Destination "."
+Copy-Item ".gitignore"        -Destination "."
+Copy-Item "config.yaml"       -Destination "config\"
+
+━━━ BLOCO 4: Criar .env a partir do exemplo ━━━━━━━━━━━━━━
+
+Copy-Item ".env.example" -Destination ".env"
+Write-Host "✅ .env criado — edite com suas chaves de API"
+
+━━━ BLOCO 5: Instalar dependências essenciais (fase 1) ━━━━
+(instala só o necessário para começar, sem torch/geo ainda)
+
+pip install pandas numpy pyarrow python-dotenv pyyaml loguru tenacity requests duckdb openmeteo-requests streamlit plotly folium streamlit-folium streamlit-autorefresh streamlit-option-menu fastapi uvicorn pydantic python-telegram-bot pytest loguru
+
+━━━ BLOCO 6: Verificar instalação ━━━━━━━━━━━━━━━━━━━━━━━━
+
+python -c "import duckdb; print('DuckDB:', duckdb.__version__)"
+python -c "import streamlit; print('Streamlit:', streamlit.__version__)"
+python -c "import fastapi; print('FastAPI:', fastapi.__version__)"
+python -c "import pandas; print('Pandas:', pandas.__version__)"
+
+━━━ BLOCO 7: Inicializar Git e fazer primeiro commit ━━━━━━
+
+git init
+git add .
+git commit -m "🚀 init: estrutura do projeto Sistema Climatico RS"
+
+════════════════════════════════════════════════════════════

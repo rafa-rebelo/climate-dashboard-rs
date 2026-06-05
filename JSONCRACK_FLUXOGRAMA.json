@@ -1,0 +1,102 @@
+{
+  "Monitor_RS_v2.0": {
+    "status_geral": "OPERACIONAL",
+    "gerado_em": "2026-06-05T23:13:39Z",
+    "banco_size_mb": 5.76,
+    "ETAPA_1__Coleta": {
+      "ANA_HidroWeb": {
+        "status": "✅ ATIVO",
+        "river_levels": "1,171 reg | 2026-06-05 15:45:00",
+        "rain_readings": "1,144 reg | 2026-06-05 15:45:00",
+        "ultima_leitura": "2026-06-05 15:45:00"
+      },
+      "INMET_500_estacoes": {
+        "status": "✅ ATIVO",
+        "inventario": "98 estações",
+        "nota": "dados horários requerem IP brasileiro"
+      },
+      "Open_Meteo_NWP": {
+        "status": "✅ ATIVO",
+        "previsoes": "1,470 horários",
+        "localidades": "10 pontos",
+        "valido_ate": "2026-06-11 23:00:00"
+      }
+    },
+    "ETAPA_2__Banco_DuckDB_11_tabelas": {
+      "stations": "102 reg | 2026-06-05 19:01:51",
+      "rain_readings": "1,144 reg | 2026-06-05 15:45:00",
+      "rain_accumulated": "3 reg | 2026-06-05 18:53:16",
+      "river_levels": "1,171 reg | 2026-06-05 15:45:00",
+      "river_status": "4 reg | 2026-06-05 21:53:16",
+      "forecasts": "1,680 reg | 2026-06-05 14:20:32",
+      "alerts_log": "0 reg | nunca",
+      "water_quality": "0 reg | nunca",
+      "model_metrics": "0 reg | nunca",
+      "river_ai_forecasts": "0 reg | nunca",
+      "wrf_hydro_results": "0 reg | nunca"
+    },
+    "ETAPA_3__Processamento": {
+      "rain_accumulator": {
+        "status": "✅ ATIVO",
+        "parquet": "accumulated_rain.parquet",
+        "tamanho": "6.9 KB",
+        "estacoes": 3,
+        "max_24h_mm": 0.2
+      },
+      "river_status_calc": {
+        "status": "✅ ATIVO",
+        "parquet": "river_status.parquet",
+        "tamanho": "5.3 KB",
+        "segmentos": 4
+      }
+    },
+    "ETAPA_4__Rios_Monitorados": {
+      "Guaíba": "1.15m → [NORMAL]",
+      "Jacuí": "0.65m → [NORMAL]",
+      "Taquari": "1.29m ▼ [NORMAL]"
+    },
+    "ETAPA_5__Modelos_ML": {
+      "treinados": "0/5",
+      "ConvLSTM_nowcast": "❌ PENDENTE",
+      "LSTM_Sinos": "❌ PENDENTE",
+      "LSTM_Taquari": "❌ PENDENTE",
+      "LSTM_Jacuí": "❌ PENDENTE",
+      "LSTM_Guaíba": "❌ PENDENTE"
+    },
+    "ETAPA_6__API_FastAPI": {
+      "status": "❌ INATIVO",
+      "porta": 8765,
+      "endpoints": 8,
+      "rotas": [
+        "POST /v1/token",
+        "GET  /v1/rivers/status",
+        "GET  /v1/rivers/{river}/levels",
+        "GET  /v1/rain/accumulated",
+        "GET  /v1/forecasts",
+        "GET  /v1/alerts",
+        "PUT  /v1/alerts/{id}/resolve",
+        "GET  /v1/stats"
+      ]
+    },
+    "ETAPA_7__Alertas_e_Dashboard": {
+      "Telegram_Bot": {
+        "alertas_ativos": 0,
+        "alertas_total": 0,
+        "ultimo_alerta": "nunca",
+        "por_severidade": {}
+      },
+      "Dashboard_Streamlit": {
+        "status": "✅ DISPONÍVEL",
+        "porta": 8501,
+        "paginas": [
+          "Visão Geral",
+          "Rios",
+          "Chuva",
+          "Previsões",
+          "Alertas",
+          "Sistema"
+        ]
+      }
+    }
+  }
+}
