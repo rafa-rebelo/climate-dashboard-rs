@@ -1,102 +1,269 @@
 {
-  "Monitor_RS_v2.0": {
-    "status_geral": "OPERACIONAL",
-    "gerado_em": "2026-06-05T23:13:39Z",
-    "banco_size_mb": 5.76,
-    "ETAPA_1__Coleta": {
-      "ANA_HidroWeb": {
-        "status": "✅ ATIVO",
-        "river_levels": "1,171 reg | 2026-06-05 15:45:00",
-        "rain_readings": "1,144 reg | 2026-06-05 15:45:00",
-        "ultima_leitura": "2026-06-05 15:45:00"
-      },
-      "INMET_500_estacoes": {
-        "status": "✅ ATIVO",
-        "inventario": "98 estações",
-        "nota": "dados horários requerem IP brasileiro"
-      },
-      "Open_Meteo_NWP": {
-        "status": "✅ ATIVO",
-        "previsoes": "1,470 horários",
-        "localidades": "10 pontos",
-        "valido_ate": "2026-06-11 23:00:00"
+  "projeto": "Sistema Autônomo de Análise Climática RS",
+  "versao": "2.0",
+  "ultima_atualizacao": "2026-06-06 00:00 UTC",
+  "resumo_progresso": {
+    "total_etapas": 47,
+    "concluidas": 24,
+    "em_progresso": 2,
+    "pendentes": 21,
+    "percentual": "51%"
+  },
+  "fases": {
+    "FASE_1_SETUP": {
+      "status": "✅ CONCLUÍDO",
+      "percentual": "100%",
+      "etapas": {
+        "claude_code_vscode": "✅ Claude Code + memória project_climate_rs.md",
+        "extensoes_vscode": "✅ Python · Pylance · GitLens · Thunder Client",
+        "projeto_criado": "✅ 01-Sistema-Autonomo_Analise-Climatica",
+        "venv_python311": "✅ (.venv) ativo",
+        "estrutura_pastas": "✅ 18 pastas criadas",
+        "init_py": "✅ 12 arquivos __init__.py",
+        "CLAUDE_md_5_agentes": "✅ 5 agentes + memória persistente",
+        "requirements_instalados": "✅ DuckDB 1.5.3 · Streamlit 1.58 · FastAPI 0.136",
+        "config_yaml": "✅ cotas RS + grade NWP + limiares",
+        "env_configurado": "✅ ANA_IDENTIFICADOR + ANA_SENHA via HEADER"
       }
     },
-    "ETAPA_2__Banco_DuckDB_11_tabelas": {
-      "stations": "102 reg | 2026-06-05 19:01:51",
-      "rain_readings": "1,144 reg | 2026-06-05 15:45:00",
-      "rain_accumulated": "3 reg | 2026-06-05 18:53:16",
-      "river_levels": "1,171 reg | 2026-06-05 15:45:00",
-      "river_status": "4 reg | 2026-06-05 21:53:16",
-      "forecasts": "1,680 reg | 2026-06-05 14:20:32",
-      "alerts_log": "0 reg | nunca",
-      "water_quality": "0 reg | nunca",
-      "model_metrics": "0 reg | nunca",
-      "river_ai_forecasts": "0 reg | nunca",
-      "wrf_hydro_results": "0 reg | nunca"
-    },
-    "ETAPA_3__Processamento": {
-      "rain_accumulator": {
-        "status": "✅ ATIVO",
-        "parquet": "accumulated_rain.parquet",
-        "tamanho": "6.9 KB",
-        "estacoes": 3,
-        "max_24h_mm": 0.2
+    "FASE_2_BANCO_DADOS": {
+      "status": "✅ CONCLUÍDO",
+      "percentual": "100%",
+      "banco": "data/climate.duckdb · 5.8 MB · Online",
+      "dados_reais": {
+        "estacoes_ativas": 102,
+        "leituras_chuva": 1144,
+        "niveis_rios": 1171,
+        "previsoes_nwp": 1680,
+        "alertas_emitidos": 0
       },
-      "river_status_calc": {
-        "status": "✅ ATIVO",
-        "parquet": "river_status.parquet",
-        "tamanho": "5.3 KB",
-        "segmentos": 4
+      "tabelas": {
+        "stations": "✅ 102 estações ativas",
+        "rain_readings": "✅ 1.144 leituras",
+        "rain_accumulated": "✅ acumulados calculados",
+        "forecasts": "✅ 1.680 previsões NOAA/GFS",
+        "alerts_log": "✅ criada — 0 alertas ativos",
+        "model_metrics": "✅ criada",
+        "river_levels": "✅ 1.171 registros ANA",
+        "water_quality": "✅ criada",
+        "river_status": "✅ 4 rios monitorados",
+        "river_ai_forecasts": "✅ criada",
+        "wrf_hydro_results": "✅ criada"
       }
     },
-    "ETAPA_4__Rios_Monitorados": {
-      "Guaíba": "1.15m → [NORMAL]",
-      "Jacuí": "0.65m → [NORMAL]",
-      "Taquari": "1.29m ▼ [NORMAL]"
-    },
-    "ETAPA_5__Modelos_ML": {
-      "treinados": "0/5",
-      "ConvLSTM_nowcast": "❌ PENDENTE",
-      "LSTM_Sinos": "❌ PENDENTE",
-      "LSTM_Taquari": "❌ PENDENTE",
-      "LSTM_Jacuí": "❌ PENDENTE",
-      "LSTM_Guaíba": "❌ PENDENTE"
-    },
-    "ETAPA_6__API_FastAPI": {
-      "status": "❌ INATIVO",
-      "porta": 8765,
-      "endpoints": 8,
-      "rotas": [
-        "POST /v1/token",
-        "GET  /v1/rivers/status",
-        "GET  /v1/rivers/{river}/levels",
-        "GET  /v1/rain/accumulated",
-        "GET  /v1/forecasts",
-        "GET  /v1/alerts",
-        "PUT  /v1/alerts/{id}/resolve",
-        "GET  /v1/stats"
-      ]
-    },
-    "ETAPA_7__Alertas_e_Dashboard": {
-      "Telegram_Bot": {
-        "alertas_ativos": 0,
-        "alertas_total": 0,
-        "ultimo_alerta": "nunca",
-        "por_severidade": {}
-      },
-      "Dashboard_Streamlit": {
-        "status": "✅ DISPONÍVEL",
-        "porta": 8501,
-        "paginas": [
-          "Visão Geral",
-          "Rios",
-          "Chuva",
-          "Previsões",
-          "Alertas",
-          "Sistema"
-        ]
+    "FASE_3_CADASTROS_APIS": {
+      "status": "🔄 EM PROGRESSO",
+      "percentual": "33%",
+      "apis": {
+        "open_meteo": "✅ EM PRODUÇÃO · 1.680 previsões · 10 pontos RS",
+        "ana_hidroweb": "✅ EM PRODUÇÃO · 1.171 registros rios · 102 estações",
+        "inmet": "⏳ PENDENTE · portal.inmet.gov.br",
+        "redemet": "⏳ PENDENTE · api.redemet.aer.mil.br",
+        "nasa_earthdata": "⏳ PENDENTE · urs.earthdata.nasa.gov",
+        "telegram_bot": "⏳ PENDENTE · @BotFather"
       }
+    },
+    "FASE_4_COLETORES": {
+      "status": "✅ CONCLUÍDO (parcial)",
+      "percentual": "57%",
+      "coletores": {
+        "noaa_collector": {
+          "status": "✅ EM PRODUÇÃO",
+          "resultado": "1.680 previsões · 10 cidades RS · 7 dias · 1.7s"
+        },
+        "ana_collector": {
+          "status": "✅ EM PRODUÇÃO",
+          "resultado": "1.171 registros rios · 102 estações · 4 rios monitorados",
+          "endpoints": "23 endpoints Swagger v1.0.3984.2",
+          "descobertas": "HEADER auth · tokenautenticacao · cotas em cm÷100"
+        },
+        "inmet_collector": "⏳ PENDENTE — aguarda token INMET",
+        "radar_collector": "⏳ PENDENTE — aguarda chave REDEMET",
+        "gpm_collector": "⏳ PENDENTE — aguarda NASA EARTHDATA",
+        "water_quality_collector": "✅ INTEGRADO no ana_collector.py"
+      }
+    },
+    "FASE_5_PROCESSAMENTO": {
+      "status": "✅ CONCLUÍDO",
+      "percentual": "100%",
+      "processadores": {
+        "rain_accumulator": {
+          "status": "✅ CONCLUÍDO",
+          "arquivo": "src/processors/rain_accumulator.py",
+          "resultado": "Acumulados 1h/3h/6h/24h/72h/7d via SQL DuckDB"
+        },
+        "river_level_processor": {
+          "status": "✅ CONCLUÍDO",
+          "arquivo": "src/processors/river_level_processor.py",
+          "resultado": "% cota + NORMAL/ATENCAO/ALERTA/EMERGENCIA"
+        },
+        "alert_classifier": {
+          "status": "✅ CONCLUÍDO",
+          "arquivo": "src/processors/alert_classifier.py",
+          "resultado": "0 alertas ativos · rios todos NORMAL"
+        },
+        "spatial_interpolator": "⏳ PENDENTE — Kriging pykrige"
+      }
+    },
+    "FASE_6_DASHBOARD": {
+      "status": "✅ CONCLUÍDO (base) · 🔄 melhorias em progresso",
+      "percentual": "75%",
+      "url_local": "http://localhost:8501",
+      "comando": "streamlit run src/dashboard/app.py --server.port 8501",
+      "http_status": "200 OK · respondendo na porta 8501",
+      "paginas_funcionando": {
+        "Visao_Geral": {
+          "status": "✅ FUNCIONANDO",
+          "conteudo": "4 KPIs rios + mapa Folium + marcadores coloridos por status + tabela acumulados 24h"
+        },
+        "Rios": {
+          "status": "✅ FUNCIONANDO",
+          "conteudo": "Gauges Plotly (0→emergência) + série histórica 72h + cotas marcadas + dados brutos"
+        },
+        "Chuva": {
+          "status": "✅ FUNCIONANDO",
+          "conteudo": "Mapa intensidade toggle 1h/6h/24h/72h + barras top-20 estações + 3 KPIs"
+        },
+        "Previsoes": {
+          "status": "✅ FUNCIONANDO",
+          "conteudo": "10 pontos config.yaml no dropdown + mapa Folium estilo Windy com círculos coloridos + gráfico NWP 7 dias"
+        },
+        "Alertas": {
+          "status": "✅ FUNCIONANDO",
+          "conteudo": "Alertas ativos + histórico + distribuição por severidade · 0 alertas agora"
+        },
+        "Sistema": {
+          "status": "✅ FUNCIONANDO",
+          "conteudo": "Status DB 5.8MB · 102 estações · 1.144 leituras · 1.171 rios · 1.680 NWP · APIs integradas · comandos update"
+        }
+      },
+      "funcionalidades": {
+        "auto_refresh": "✅ 10 minutos · streamlit-autorefresh",
+        "tema_dark": "✅ #0f172a via CSS injetado",
+        "cache": "✅ @st.cache_data(ttl=600)",
+        "mobile": "✅ breakpoint @media max-width 768px",
+        "mapa_camadas": "✅ Chuva 24h · Status Rios · Estações INMET",
+        "github_data_source": "✅ badge fonte dados (GitHub/local) no sidebar",
+        "data_loader": "✅ GitHub Raw primeiro · fallback local · DataSource metadata"
+      },
+      "melhorias_pendentes": {
+        "meteogram_hcmr": "⏳ Multi-eixos HCMR style",
+        "wrf_hydro_viewer": "⏳ Rede hidrográfica colorida por bacia",
+        "water_quality_view": "⏳ pH · O2 · condutividade · turbidez",
+        "ai_models_view": "⏳ LSTM por rio com IC 95%",
+        "deploy_streamlit": "⏳ streamlit.app público"
+      }
+    },
+    "FASE_7_GITHUB_ACTIONS": {
+      "status": "✅ CONCLUÍDO",
+      "percentual": "100%",
+      "repositorio_dados": "github.com/rafa-rebelo/climate-data-rs (público)",
+      "repositorio_codigo": "github.com/rafa-rebelo/climate-dashboard-rs (privado)",
+      "workflows": {
+        "collect_realtime": "✅ cron */10 * * * * · ANA + NOAA + acumulados + progress",
+        "alerts_job": "✅ dispara após collect · verifica Telegram",
+        "dual_checkout": "✅ data-repo raiz + code-repo em code/",
+        "pythonpath": "✅ PYTHONPATH=${{ github.workspace }}/code/src",
+        "artefatos_publicados": "✅ accumulated_rain.parquet · river_status.parquet · nwp_7days.parquet · climate.duckdb · progress.json"
+      }
+    },
+    "FASE_8_MODELOS_ML": {
+      "status": "⏳ PENDENTE",
+      "percentual": "0%",
+      "prerequisito": "30+ dias dados históricos radar e rios",
+      "modelos": {
+        "convlstm_nowcast": "⏳ aguarda REDEMET radar",
+        "lstm_sinos": "⏳ aguarda 30 dias histórico",
+        "lstm_taquari": "⏳ aguarda 30 dias histórico",
+        "lstm_jacui": "⏳ aguarda 30 dias histórico",
+        "lstm_guaiba": "⏳ aguarda 30 dias histórico",
+        "online_trainer": "⏳ PENDENTE",
+        "drift_detector": "⏳ PENDENTE"
+      }
+    },
+    "FASE_9_API_REST": {
+      "status": "⏳ PENDENTE",
+      "percentual": "0%",
+      "arquivo": "src/api/main.py",
+      "deploy": "Railway R$ 0/mês"
+    },
+    "FASE_10_ALERTAS": {
+      "status": "⏳ PENDENTE",
+      "percentual": "0%",
+      "telegram": "⏳ @BotFather → /newbot",
+      "webhooks": "⏳ PENDENTE"
+    },
+    "FASE_11_TESTES_DEPLOY": {
+      "status": "⏳ PENDENTE",
+      "percentual": "0%"
     }
+  },
+  "arquivos_criados": {
+    "FUNCIONANDO": {
+      "CLAUDE.md": "✅ 5 agentes",
+      "requirements.txt": "✅",
+      "config.yaml": "✅ cotas RS",
+      ".env": "✅ ANA configurado",
+      "src/database/db_manager.py": "✅ 11 tabelas · 5.8MB",
+      "src/collectors/noaa_collector.py": "✅ 1.680 previsões",
+      "src/collectors/ana_collector.py": "✅ 1.171 registros",
+      "src/processors/rain_accumulator.py": "✅ acumulados SQL",
+      "src/processors/river_level_processor.py": "✅ % cota",
+      "src/processors/alert_classifier.py": "✅ 0 alertas",
+      "src/dashboard/app.py": "✅ 6 páginas · localhost:8501",
+      "src/dashboard/utils/data_loader.py": "✅ GitHub Raw + fallback local + DataSource",
+      "src/utils/progress_tracker.py": "✅ gera progress.json + JSONCRACK_FLUXOGRAMA.json",
+      "climate-data-rs/.github/workflows/collect_realtime.yml": "✅ cron 10min · dual-checkout · PYTHONPATH correto"
+    },
+    "PENDENTES": [
+      "src/collectors/inmet_collector.py",
+      "src/collectors/radar_collector.py",
+      "src/collectors/gpm_collector.py",
+      "src/processors/spatial_interpolator.py",
+      "src/models/convlstm_nowcast.py",
+      "src/models/lstm_river.py",
+      "src/models/online_trainer.py",
+      "src/models/drift_detector.py",
+      "src/dashboard/components/meteogram_view.py",
+      "src/dashboard/components/wrf_hydro_view.py",
+      "src/dashboard/components/water_quality_view.py",
+      "src/dashboard/components/ai_models_view.py",
+      "src/api/main.py",
+      "src/alerts/telegram_alert.py",
+      ".github/workflows/auto_retrain.yml"
+    ]
+  },
+  "dashboard_ao_vivo": {
+    "url": "http://localhost:8501",
+    "status": "✅ ONLINE",
+    "banco_db": "✅ Online · 5.8 MB",
+    "estacoes_ativas": 102,
+    "leituras_chuva": 1144,
+    "niveis_rios": 1171,
+    "previsoes_nwp": 1680,
+    "alertas_ativos": 0,
+    "status_rios": {
+      "Guaíba": "🟢 NORMAL · 1.15m / 3.0m (38%)",
+      "Guaíba2": "🟢 NORMAL · 2.18m / 3.0m (73%)",
+      "Jacuí": "🟢 NORMAL · 0.65m / 7.0m (9%)",
+      "Taquari": "🟢 NORMAL · 1.29m / 5.0m (26%)"
+    }
+  },
+  "proximas_acoes": {
+    "1_AGORA": "Telegram Bot — alertas no celular (@BotFather /newbot)",
+    "2_SEGUINTE": "INMET collector — 500 estações automáticas",
+    "3_SEGUINTE": "Modelos LSTM — após 30 dias de dados coletados",
+    "4_SEGUINTE": "Deploy Streamlit Cloud público",
+    "5_PARALELO": "Cadastrar REDEMET api.redemet.aer.mil.br",
+    "6_PARALELO": "Cadastrar NASA EARTHDATA urs.earthdata.nasa.gov"
+  },
+  "json_automatico": {
+    "status": "✅ IMPLEMENTADO",
+    "arquivo": "src/utils/progress_tracker.py",
+    "integracao": "climate-data-rs/.github/workflows/collect_realtime.yml — commit automático a cada 10min",
+    "resultado": "JSON Crack atualizado automaticamente a cada execução do pipeline"
+  },
+  "custos": {
+    "TOTAL_MENSAL": "R$ 0,00"
   }
 }
