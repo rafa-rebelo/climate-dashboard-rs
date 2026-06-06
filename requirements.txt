@@ -14,7 +14,7 @@ httpx==0.27.0
 duckdb==0.10.1
 
 # ── Dados climáticos ─────────────────────────────────────────────
-openmeteo-requests==1.2.3
+openmeteo-requests>=1.0.0
 metpy==1.6.2
 xarray==2024.2.0
 netCDF4==1.6.5
