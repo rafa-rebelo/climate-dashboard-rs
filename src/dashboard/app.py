@@ -60,6 +60,16 @@ try:
 except ImportError:
     _FOLIUM_OK = False
 
+# data_loader — GitHub Raw com fallback local
+try:
+    from dashboard.utils.data_loader import (
+        DataSource, fetch_accumulated_rain, fetch_river_status,
+        fetch_nwp_forecasts, fetch_progress,
+    )
+    _LOADER_OK = True
+except ImportError:
+    _LOADER_OK = False
+
 # streamlit-autorefresh
 try:
     from streamlit_autorefresh import st_autorefresh
@@ -204,9 +214,20 @@ def load_river_levels(river: str, hours: int = 72) -> pd.DataFrame:
     """, [river, cutoff])
 
 
-def load_rain_accumulated() -> pd.DataFrame:
-    """Carrega acumulados de chuva mais recentes por estação."""
-    return _query("""
+def load_rain_accumulated() -> tuple[pd.DataFrame, "DataSource"]:
+    """
+    Carrega acumulados de chuva — GitHub Raw primeiro, DuckDB como fallback.
+
+    Returns:
+        Tupla (DataFrame, DataSource) com dados e metadados de origem.
+    """
+    if _LOADER_OK:
+        df, src = fetch_accumulated_rain()
+        if not df.empty:
+            return df, src
+
+    # Fallback DuckDB
+    df = _query("""
         SELECT ra.station_id, ra.date, ra.rain_1h, ra.rain_3h, ra.rain_6h,
                ra.rain_12h, ra.rain_24h, ra.rain_48h, ra.rain_72h,
                s.lat, s.lon, s.name AS station_name, s.municipality,
@@ -218,10 +239,33 @@ def load_rain_accumulated() -> pd.DataFrame:
         )
         ORDER BY ra.rain_24h DESC
     """)
+    from datetime import datetime, timezone
+    from dashboard.utils.data_loader import DataSource as _DS
+    return df, _DS(source="local", url=_DB_PATH)
 
 
 def load_forecasts(location: str = "Porto Alegre") -> pd.DataFrame:
-    """Carrega previsões NWP para uma localidade."""
+    """
+    Carrega previsões NWP para uma localidade — parquet GitHub → DuckDB.
+
+    Args:
+        location: Nome da localidade (ex: "Porto Alegre").
+
+    Returns:
+        DataFrame filtrado para a localidade, ordenado por valid_ts.
+    """
+    if _LOADER_OK:
+        df_all, _ = fetch_nwp_forecasts()
+        if not df_all.empty and "location_name" in df_all.columns:
+            now = pd.Timestamp.now(tz="UTC")
+            df = df_all[
+                (df_all["location_name"] == location) &
+                (df_all["valid_ts"] >= now)
+            ].sort_values("valid_ts").head(168)
+            if not df.empty:
+                return df
+
+    # Fallback DuckDB
     return _query("""
         SELECT location_name, valid_ts, rain_mm, temperature,
                wind_speed, cape_j_kg, lifted_index, k_index, model_source
@@ -249,6 +293,28 @@ def load_all_forecasts_summary() -> pd.DataFrame:
     h24 = now_utc + timedelta(hours=24)
     h48 = now_utc + timedelta(hours=48)
 
+    # Tenta parquet do GitHub primeiro
+    if _LOADER_OK:
+        df_all, _ = fetch_nwp_forecasts()
+        if not df_all.empty and "valid_ts" in df_all.columns:
+            df_all["valid_ts"] = pd.to_datetime(df_all["valid_ts"], utc=True,
+                                                 errors="coerce")
+            fut = df_all[df_all["valid_ts"] >= pd.Timestamp(now_utc)]
+            if not fut.empty:
+                df = fut.groupby("location_name").apply(
+                    lambda g: pd.Series({
+                        "rain_6h":   g.loc[g["valid_ts"] <= pd.Timestamp(h6),  "rain_mm"].sum(),
+                        "rain_24h":  g.loc[g["valid_ts"] <= pd.Timestamp(h24), "rain_mm"].sum(),
+                        "rain_48h":  g.loc[g["valid_ts"] <= pd.Timestamp(h48), "rain_mm"].sum(),
+                        "temp_mean": g.loc[g["valid_ts"] <= pd.Timestamp(h24), "temperature"].mean(),
+                        "cape_max":  g.loc[g["valid_ts"] <= pd.Timestamp(h24), "cape_j_kg"].max()
+                            if "cape_j_kg" in g.columns else None,
+                    })
+                ).reset_index()
+                coords = pd.DataFrame(NWP_POINTS).rename(columns={"nome": "location_name"})
+                return df.merge(coords, on="location_name", how="left")
+
+    # Fallback DuckDB
     df = _query("""
         SELECT location_name,
                SUM(CASE WHEN valid_ts <= ? THEN COALESCE(rain_mm, 0) ELSE 0 END) AS rain_6h,
@@ -264,7 +330,6 @@ def load_all_forecasts_summary() -> pd.DataFrame:
     if df.empty:
         return df
 
-    # Anexar coordenadas dos NWP_POINTS
     coords = pd.DataFrame(NWP_POINTS).rename(columns={"nome": "location_name"})
     return df.merge(coords, on="location_name", how="left")
 
@@ -1118,22 +1183,42 @@ def main() -> None:
         db_ok = Path(_DB_PATH).exists()
         st.caption(f"DB: {'✅' if db_ok else '❌'} {'encontrado' if db_ok else 'não encontrado'}")
 
-    # Carregamento de dados comuns (com cache)
+    # Carregamento de dados comuns (com cache) — GitHub Raw → local fallback
     @st.cache_data(ttl=600)
     def _cached_river_status() -> pd.DataFrame:
         return load_river_status()
 
     @st.cache_data(ttl=600)
-    def _cached_rain() -> pd.DataFrame:
+    def _cached_rain() -> tuple:
         return load_rain_accumulated()
 
     @st.cache_data(ttl=3600)
     def _cached_stations() -> pd.DataFrame:
         return load_stations()
 
-    river_status_df = _cached_river_status()
-    rain_df         = _cached_rain()
-    stations_df     = _cached_stations()
+    river_status_df     = _cached_river_status()
+    rain_result         = _cached_rain()
+    # load_rain_accumulated retorna (df, DataSource) se loader disponível
+    if isinstance(rain_result, tuple):
+        rain_df, rain_src = rain_result
+    else:
+        rain_df, rain_src = rain_result, None
+    stations_df = _cached_stations()
+
+    # Badge de fonte dos dados na sidebar
+    with st.sidebar:
+        st.markdown("---")
+        if rain_src is not None:
+            color  = rain_src.badge_color
+            label  = rain_src.label
+            st.markdown(
+                f"<div style='font-size:0.78em;padding:4px 8px;border-radius:6px;"
+                f"background:{color}22;border:1px solid {color};color:{color};"
+                f"text-align:center'>{label}</div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.caption("📦 Fonte: banco local")
 
     # Alertas ativos na sidebar
     df_act = load_alerts(limit=5, active_only=True)
