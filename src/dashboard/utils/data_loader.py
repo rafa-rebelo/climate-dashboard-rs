@@ -39,15 +39,21 @@ _URLS: dict[str, str] = {
     "nwp_7days":        f"{GITHUB_RAW}/data/forecasts/nwp_7days.parquet",
     "climate_duckdb":   f"{GITHUB_RAW}/data/climate.duckdb",
     "progress":         f"{GITHUB_RAW}/data/processed/progress.json",
+    "gpm_precip":       f"{GITHUB_RAW}/data/processed/gpm_precip_1d.parquet",
+    "inmet_historico":  f"{GITHUB_RAW}/data/processed/inmet_historico_rs.parquet",
+    "inmet_stations":   f"{GITHUB_RAW}/data/processed/inmet_stations_rs.parquet",
 }
 
-_ROOT = Path(__file__).resolve().parents[4]
+_ROOT = Path(__file__).resolve().parents[3]
 _LOCAL: dict[str, Path] = {
     "accumulated_rain": _ROOT / "data" / "processed" / "accumulated_rain.parquet",
     "river_status":     _ROOT / "data" / "processed" / "river_status.parquet",
     "nwp_7days":        _ROOT / "data" / "forecasts"  / "nwp_7days.parquet",
     "climate_duckdb":   _ROOT / "data" / "climate.duckdb",
     "progress":         _ROOT / "data" / "processed"  / "progress.json",
+    "gpm_precip":       _ROOT / "data" / "processed" / "gpm_precip_1d.parquet",
+    "inmet_historico":  _ROOT / "data" / "processed" / "inmet_historico_rs.parquet",
+    "inmet_stations":   _ROOT / "data" / "processed" / "inmet_stations_rs.parquet",
 }
 
 _TIMEOUT = 8   # segundos — não bloqueia o dashboard por muito tempo
@@ -292,3 +298,33 @@ def fetch_progress() -> tuple[dict, DataSource]:
 
     return {}, DataSource(source="unavailable", url=url,
                           error="progress.json indisponível")
+
+
+def fetch_gpm_precip() -> tuple[pd.DataFrame, DataSource]:
+    """
+    Carrega precipitação satélite (GPM IMERG / CHIRPS) do GitHub → local.
+
+    Returns:
+        (DataFrame com colunas: lat, lon, precip_mm, timestamp, source, DataSource)
+    """
+    return fetch_parquet("gpm_precip")
+
+
+def fetch_inmet_historico() -> tuple[pd.DataFrame, DataSource]:
+    """
+    Carrega histórico horário INMET RS (últimos 30 dias) do GitHub → local.
+
+    Returns:
+        (DataFrame com colunas: station_id, ts, precip_mm, temp_c, ..., DataSource)
+    """
+    return fetch_parquet("inmet_historico")
+
+
+def fetch_inmet_stations() -> tuple[pd.DataFrame, DataSource]:
+    """
+    Carrega inventário de estações INMET RS (98 estações) do GitHub → local.
+
+    Returns:
+        (DataFrame com colunas: station_id, name, lat, lon, municipality, DataSource)
+    """
+    return fetch_parquet("inmet_stations")

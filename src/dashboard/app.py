@@ -52,9 +52,10 @@ from loguru import logger
 
 load_dotenv()
 
-# folium + streamlit-folium
+# folium + streamlit-folium + plugins
 try:
     import folium
+    from folium.plugins import HeatMap as _FoliumHeatMap
     from streamlit_folium import st_folium
     _FOLIUM_OK = True
 except ImportError:
@@ -65,6 +66,7 @@ try:
     from dashboard.utils.data_loader import (
         DataSource, fetch_accumulated_rain, fetch_river_status,
         fetch_nwp_forecasts, fetch_progress,
+        fetch_gpm_precip, fetch_inmet_historico, fetch_inmet_stations,
     )
     _LOADER_OK = True
 except ImportError:
@@ -385,6 +387,43 @@ def load_system_stats() -> dict:
     return stats
 
 
+@st.cache_data(ttl=1800)
+def load_gpm_precip() -> pd.DataFrame:
+    """
+    Carrega grade de precipitação satélite GPM/CHIRPS (GitHub Raw → local).
+
+    Returns:
+        DataFrame com lat, lon, precip_mm, timestamp, source (17k+ pontos RS).
+    """
+    if not _LOADER_OK:
+        return pd.DataFrame()
+    df, src = fetch_gpm_precip()
+    if not df.empty:
+        logger.info(f"GPM precip: {len(df):,} pontos ← {src.label}")
+    return df
+
+
+@st.cache_data(ttl=600)
+def load_inmet_latest() -> pd.DataFrame:
+    """
+    Carrega histórico INMET e retorna leitura mais recente por estação.
+
+    Returns:
+        DataFrame com station_id, lat, lon, precip_mm, temp_c, humidity_pct
+        (uma linha por estação, ~98 linhas).
+    """
+    if not _LOADER_OK:
+        return pd.DataFrame()
+    df, _ = fetch_inmet_historico()
+    if df.empty:
+        return df
+    # Obtém leitura mais recente por estação
+    ts_col = next((c for c in ("ts", "timestamp", "date_utc") if c in df.columns), None)
+    if ts_col:
+        df = df.sort_values(ts_col).groupby("station_id").last().reset_index()
+    return df
+
+
 # ---------------------------------------------------------------------------
 # Componentes de visualização
 # ---------------------------------------------------------------------------
@@ -580,7 +619,7 @@ def _forecast_chart(df: pd.DataFrame, location: str) -> go.Figure:
         paper_bgcolor="#0f172a",
         plot_bgcolor="#1e293b",
         font={"color": "#e2e8f0", "size": 12},
-        legend={"bgcolor": "#1e293b44", "bordercolor": "#334155",
+        legend={"bgcolor": "rgba(30,41,59,0.27)", "bordercolor": "#334155",
                 "borderwidth": 1, "x": 1.18, "y": 1},
         hovermode="x unified",
         height=480,
@@ -687,18 +726,42 @@ def _wind_rose(df: pd.DataFrame, location: str) -> go.Figure:
     return fig
 
 
+def _inmet_rain_color(mm: float) -> str:
+    """
+    Escala de cores Windy para chuva de estações pontuais.
+
+    Args:
+        mm: Milímetros acumulados no período selecionado.
+
+    Returns:
+        Cor hex para o marker.
+    """
+    if mm <= 0:    return "#555555"
+    if mm < 5:     return "#4fc3f7"
+    if mm < 20:    return "#1565c0"
+    if mm < 40:    return "#2e7d32"
+    if mm < 60:    return "#f9a825"
+    return "#c62828"
+
+
 def _build_map(stations_df: pd.DataFrame,
                rain_df: pd.DataFrame,
                river_status_df: pd.DataFrame,
-               period: str = "rain_24h") -> Optional["folium.Map"]:
+               period: str = "rain_24h",
+               gpm_df: Optional[pd.DataFrame] = None,
+               inmet_df: Optional[pd.DataFrame] = None,
+               show_layers: Optional[dict] = None) -> Optional["folium.Map"]:
     """
-    Mapa Folium estilo Windy: círculos coloridos por chuva + marcadores de rios.
+    Mapa Folium estilo Windy: HeatMap GPM + círculos INMET + marcadores de rios.
 
     Args:
         stations_df: DataFrame de estações (com lat/lon/source).
-        rain_df: DataFrame de acumulados de chuva por estação.
+        rain_df: DataFrame de acumulados de chuva por estação (ANA + INMET).
         river_status_df: DataFrame de status atual dos rios.
         period: Coluna de acumulado a exibir (ex: "rain_24h").
+        gpm_df: DataFrame GPM/CHIRPS com lat, lon, precip_mm (17k+ pontos RS).
+        show_layers: Dict com booleanos para cada camada:
+            {"heatmap": True, "inmet": True, "rios": True, "nwp": False}
 
     Returns:
         Objeto folium.Map ou None se folium não estiver disponível.
@@ -707,6 +770,7 @@ def _build_map(stations_df: pd.DataFrame,
         return None
 
     period_label = period.replace("rain_", "")
+    layers = show_layers or {"heatmap": True, "inmet": True, "rios": True, "nwp": False}
 
     m = folium.Map(
         location=[-29.5, -53.0],
@@ -715,25 +779,54 @@ def _build_map(stations_df: pd.DataFrame,
         prefer_canvas=True,
     )
 
-    # ── Legenda flutuante estilo Windy ──────────────────────────────────────
-    legend_html = f"""
-    <div style="position:fixed;bottom:30px;left:30px;z-index:9999;
+    # ── Legenda flutuante (canto inferior direito) ──────────────────────────
+    legend_html = """
+    <div style="position:fixed;bottom:30px;right:15px;z-index:9999;
                 background:#1e293bdd;border:1px solid #475569;border-radius:8px;
-                padding:10px 14px;font-size:12px;color:#e2e8f0;line-height:1.85;
+                padding:10px 14px;font-size:11px;color:#e2e8f0;line-height:1.85;
                 backdrop-filter:blur(4px)">
-        <b style="color:#f8fafc">Chuva acumulada {period_label}</b><br>
-        <span style="color:#64748b">●</span>&nbsp;Sem dados<br>
-        <span style="color:#93c5fd">●</span>&nbsp;&lt; 5 mm<br>
-        <span style="color:#1d4ed8">●</span>&nbsp;5 – 20 mm<br>
-        <span style="color:#16a34a">●</span>&nbsp;20 – 40 mm<br>
-        <span style="color:#ca8a04">●</span>&nbsp;40 – 60 mm<br>
-        <span style="color:#dc2626">●</span>&nbsp;&gt; 60 mm
+        <b style="color:#f8fafc;font-size:12px">Precipitação</b><br>
+        <span style="color:#555555">⬤</span>&nbsp;Sem chuva<br>
+        <span style="color:#4fc3f7">⬤</span>&nbsp;&lt; 5 mm<br>
+        <span style="color:#1565c0">⬤</span>&nbsp;5 – 20 mm<br>
+        <span style="color:#2e7d32">⬤</span>&nbsp;20 – 40 mm<br>
+        <span style="color:#f9a825">⬤</span>&nbsp;40 – 60 mm<br>
+        <span style="color:#c62828">⬤</span>&nbsp;&gt; 60 mm
     </div>
     """
     m.get_root().html.add_child(folium.Element(legend_html))
 
-    # ── Camada de chuva (círculos coloridos por intensidade) ────────────────
-    rain_layer = folium.FeatureGroup(name=f"Chuva {period_label} (círculos)", show=True)
+    # ── HeatMap GPM/CHIRPS ────────────────────────────────────────────────
+    if layers.get("heatmap", True) and gpm_df is not None and not gpm_df.empty:
+        _gpm_valid = gpm_df.dropna(subset=["lat", "lon", "precip_mm"])
+        if not _gpm_valid.empty:
+            _max_p = _gpm_valid["precip_mm"].max()
+            if _max_p > 0:
+                heat_data = [
+                    [float(r.lat), float(r.lon),
+                     float(r.precip_mm) / _max_p]
+                    for r in _gpm_valid.itertuples()
+                ]
+            else:
+                heat_data = [[float(r.lat), float(r.lon), 0.0]
+                             for r in _gpm_valid.itertuples()]
+            _FoliumHeatMap(
+                heat_data,
+                gradient={
+                    "0.0": "#313695", "0.2": "#4575b4", "0.4": "#74add1",
+                    "0.6": "#abd9e9", "0.7": "#fee090", "0.8": "#f46d43",
+                    "0.9": "#d73027", "1.0": "#a50026",
+                },
+                radius=15,
+                blur=20,
+                min_opacity=0.3,
+                name="HeatMap GPM/CHIRPS",
+            ).add_to(m)
+
+    # ── Camada estações INMET (círculos coloridos por intensidade) ──────────
+    rain_layer = folium.FeatureGroup(
+        name=f"Estações chuva {period_label}", show=layers.get("inmet", True)
+    )
     if not rain_df.empty and period in rain_df.columns:
         ts_col = next((c for c in ("max_ts", "ts", "updated_at") if c in rain_df.columns), None)
         for _, row in rain_df.iterrows():
@@ -841,21 +934,42 @@ def _build_map(stations_df: pd.DataFrame,
             ).add_to(rivers_layer)
     rivers_layer.add_to(m)
 
-    # ── Camada de estações INMET (pontos pequenos, oculta por padrão) ──────
-    inmet_layer = folium.FeatureGroup(name="Estações INMET", show=False)
-    if not stations_df.empty and "source" in stations_df.columns:
-        inmet = stations_df[stations_df["source"] == "INMET"]
-        for _, row in inmet.iterrows():
-            if pd.isna(row.get("lat")) or pd.isna(row.get("lon")):
+    # ── Camada de estações INMET (círculos coloridos por chuva) ────────────
+    inmet_layer = folium.FeatureGroup(
+        name="Estações INMET (chuva recente)", show=layers.get("inmet_pts", False)
+    )
+    _inmet_src = inmet_df if (inmet_df is not None and not inmet_df.empty) else None
+    if _inmet_src is not None:
+        for row in _inmet_src.itertuples():
+            if pd.isna(row.lat) or pd.isna(row.lon):
+                continue
+            mm    = float(getattr(row, "precip_mm", 0) or 0)
+            color = _inmet_rain_color(mm)
+            rad   = max(6, min(25, 6 + mm * 0.32))
+            name  = str(getattr(row, "station_id", "?"))
+            folium.CircleMarker(
+                location=[row.lat, row.lon],
+                radius=rad,
+                color=color,
+                weight=0,
+                fill=True,
+                fill_color=color,
+                fill_opacity=0.85,
+                tooltip=f"INMET {name}: {mm:.1f} mm",
+            ).add_to(inmet_layer)
+    elif not stations_df.empty and "source" in stations_df.columns:
+        for row in stations_df[stations_df["source"] == "INMET"].itertuples():
+            if pd.isna(row.lat) or pd.isna(row.lon):
                 continue
             folium.CircleMarker(
-                location=[row["lat"], row["lon"]],
-                radius=3,
+                location=[row.lat, row.lon],
+                radius=4,
                 color="#94a3b8",
+                weight=0,
                 fill=True,
                 fill_color="#94a3b8",
                 fill_opacity=0.5,
-                tooltip=f"INMET: {row.get('name', row.get('station_id', '?'))}",
+                tooltip=f"INMET: {getattr(row, 'name', getattr(row, 'station_id', '?'))}",
             ).add_to(inmet_layer)
     inmet_layer.add_to(m)
 
@@ -1033,16 +1147,41 @@ def _page_overview(river_status_df: pd.DataFrame,
     )
     period_col = _period_opts[periodo]
 
+    # ── Dados satélite / INMET (carregados em background) ─────────────────
+    gpm_df    = load_gpm_precip()
+    inmet_df  = load_inmet_latest()
+
+    # ── Toggles de camadas (sidebar) ──────────────────────────────────────
+    with st.sidebar:
+        st.markdown("#### 🗂️ Camadas do mapa")
+        show_heatmap  = st.checkbox("HeatMap GPM/CHIRPS",       value=True)
+        show_inmet_pt = st.checkbox("Pontos INMET (chuva)",     value=False)
+        show_rios     = st.checkbox("Status dos Rios",          value=True)
+        show_layers = {
+            "heatmap":   show_heatmap,
+            "inmet_pts": show_inmet_pt,
+            "rios":      show_rios,
+        }
+
     # ── Layout mapa (3/4) + painel lateral (1/4) ──────────────────────────
     col_map, col_right = st.columns([3, 1])
 
     with col_map:
         if _FOLIUM_OK:
-            m = _build_map(stations_df, rain_df, river_status_df, period=period_col)
+            m = _build_map(
+                stations_df, rain_df, river_status_df,
+                period=period_col,
+                gpm_df=gpm_df if not gpm_df.empty else None,
+                inmet_df=inmet_df if not inmet_df.empty else None,
+                show_layers=show_layers,
+            )
             if m is not None:
                 st_folium(m, use_container_width=True, height=560, returned_objects=[])
         else:
             st.warning("Instale `streamlit-folium`: `pip install streamlit-folium`")
+        if not gpm_df.empty:
+            src_label = "CHIRPS/GPM"
+            st.caption(f"Precipitação satélite: {len(gpm_df):,} pontos RS ← {src_label}")
 
     with col_right:
         # Legenda de chuva
@@ -1236,19 +1375,179 @@ def _page_rain(rain_df: pd.DataFrame) -> None:
         st.dataframe(disp, use_container_width=True, hide_index=True)
 
 
+def _wind_forecast_chart(df: pd.DataFrame, location: str) -> go.Figure:
+    """
+    Gráfico de velocidade e direção do vento (Y1 velocidade, Y2 direção).
+
+    Args:
+        df: DataFrame NWP com colunas wind_speed e wind_direction_deg.
+        location: Nome da localidade para o título.
+
+    Returns:
+        Figure Plotly com dois eixos Y.
+    """
+    fig = go.Figure()
+    has_speed = "wind_speed" in df.columns
+    has_dir   = "wind_direction_deg" in df.columns or "wind_direction" in df.columns
+    dir_col   = "wind_direction_deg" if "wind_direction_deg" in df.columns else "wind_direction"
+
+    if has_speed:
+        fig.add_trace(go.Scatter(
+            x=df["valid_ts"],
+            y=df["wind_speed"],
+            name="Velocidade (km/h)",
+            line={"color": "#4ade80", "width": 2},
+            fill="tozeroy",
+            fillcolor="rgba(74,222,128,0.15)",
+            yaxis="y1",
+        ))
+
+    if has_dir and dir_col in df.columns:
+        # Cor do ponto por quadrante
+        dirs = df[dir_col].fillna(0)
+        def _dir_color(d: float) -> str:
+            d = d % 360
+            if d < 90:   return "#38bdf8"   # N→L  azul
+            if d < 180:  return "#fb923c"   # L→S  laranja
+            if d < 270:  return "#f43f5e"   # S→O  vermelho
+            return "#a78bfa"                # O→N  roxo
+        pt_colors = [_dir_color(float(d)) for d in dirs]
+
+        fig.add_trace(go.Scatter(
+            x=df["valid_ts"],
+            y=dirs,
+            name="Direção (°)",
+            mode="markers",
+            marker={"color": pt_colors, "size": 7, "symbol": "arrow-up",
+                    "angle": dirs.tolist()},
+            yaxis="y2",
+        ))
+
+    _DARK = "#0f172a"
+    fig.update_layout(
+        paper_bgcolor=_DARK,
+        plot_bgcolor="#1e293b",
+        font={"color": "#e2e8f0", "size": 12},
+        height=280,
+        margin={"t": 30, "b": 50, "l": 50, "r": 60},
+        legend={"bgcolor": "rgba(30,41,59,0.27)"},
+        title={"text": f"Vento — {location}", "font": {"size": 14, "color": "#f8fafc"}},
+        xaxis={"gridcolor": "#334155"},
+        yaxis={"title": "km/h", "gridcolor": "#334155", "titlefont": {"color": "#4ade80"},
+               "tickfont": {"color": "#4ade80"}},
+        yaxis2={"title": "Direção (°)", "overlaying": "y", "side": "right",
+                "range": [0, 360], "showgrid": False,
+                "titlefont": {"color": "#94a3b8"}, "tickfont": {"color": "#94a3b8"}},
+    )
+    if not has_speed and not has_dir:
+        fig.add_annotation(text="Dados de vento indisponíveis",
+                           xref="paper", yref="paper", x=0.5, y=0.5,
+                           showarrow=False, font={"color": "#64748b", "size": 14})
+    return fig
+
+
+def _solar_chart(df: pd.DataFrame, location: str) -> go.Figure:
+    """
+    Gráfico de radiação solar prevista com bandas noturnas (20h–06h) hachuradas.
+
+    Args:
+        df: DataFrame NWP com colunas shortwave_radiation (W/m²) e valid_ts.
+        location: Nome da localidade.
+
+    Returns:
+        Figure Plotly com área preenchida amarela e bandas noturnas.
+    """
+    fig = go.Figure()
+    _DARK = "#0f172a"
+    rad_col = next(
+        (c for c in ("shortwave_radiation", "solar_radiation", "radiation_w_m2")
+         if c in df.columns),
+        None,
+    )
+
+    if rad_col:
+        fig.add_trace(go.Scatter(
+            x=df["valid_ts"],
+            y=df[rad_col].clip(lower=0),
+            name="Radiação (W/m²)",
+            line={"color": "#fbbf24", "width": 2},
+            fill="tozeroy",
+            fillcolor="rgba(251,191,36,0.20)",
+        ))
+
+        # Bandas noturnas (20h–06h UTC-3 = 23h–09h UTC)
+        if "valid_ts" in df.columns and len(df) > 1:
+            ts_vals = pd.to_datetime(df["valid_ts"])
+            t_min, t_max = ts_vals.min(), ts_vals.max()
+            import datetime as _dt
+            cur = t_min.normalize()
+            while cur <= t_max:
+                night_start = cur + pd.Timedelta(hours=23)
+                night_end   = cur + pd.Timedelta(hours=33)  # +1 day 09h
+                if night_end > t_min and night_start < t_max:
+                    fig.add_vrect(
+                        x0=max(night_start, t_min),
+                        x1=min(night_end, t_max),
+                        fillcolor="rgba(15,23,42,0.55)",
+                        layer="below",
+                        line_width=0,
+                    )
+                cur += pd.Timedelta(days=1)
+
+    fig.update_layout(
+        paper_bgcolor=_DARK,
+        plot_bgcolor="#1e293b",
+        font={"color": "#e2e8f0", "size": 12},
+        height=240,
+        margin={"t": 30, "b": 50, "l": 60, "r": 20},
+        legend={"bgcolor": "rgba(30,41,59,0.27)"},
+        title={"text": f"Radiação Solar — {location}", "font": {"size": 14, "color": "#f8fafc"}},
+        xaxis={"gridcolor": "#334155"},
+        yaxis={"title": "W/m²", "gridcolor": "#334155",
+               "titlefont": {"color": "#fbbf24"}, "tickfont": {"color": "#fbbf24"}},
+    )
+    if not rad_col:
+        fig.add_annotation(text="Dados de radiação solar indisponíveis",
+                           xref="paper", yref="paper", x=0.5, y=0.5,
+                           showarrow=False, font={"color": "#64748b", "size": 14})
+    return fig
+
+
 def _page_forecasts() -> None:
     """Página de previsões NWP: mapa Windy + meteograma multi-eixo + rosa dos ventos."""
     st.markdown("## 🔮 Previsões Meteorológicas")
 
     all_locations = [p["nome"] for p in NWP_POINTS]
-    loc = st.selectbox("Localidade", all_locations, index=0)
+    c_loc, c_per = st.columns([2, 3])
+    with c_loc:
+        loc = st.selectbox("Localidade", all_locations, index=0)
+    with c_per:
+        _period_fc_opts = {
+            "6h": 6, "24h": 24, "36h": 36, "48h": 48, "72h": 72, "7d": 168,
+        }
+        periodo_fc = st.radio(
+            "Horizonte",
+            list(_period_fc_opts.keys()),
+            index=1,
+            horizontal=True,
+        )
+        _hours_fc = _period_fc_opts[periodo_fc]
 
     @st.cache_data(ttl=600)
     def _cached_summary() -> pd.DataFrame:
         return load_all_forecasts_summary()
 
     summary_df = _cached_summary()
-    df_fc      = load_forecasts(loc)
+    df_fc_all  = load_forecasts(loc)
+
+    # Filtrar pelo horizonte selecionado
+    if not df_fc_all.empty and "valid_ts" in df_fc_all.columns:
+        t0_fc  = pd.to_datetime(df_fc_all["valid_ts"].min())
+        df_fc  = df_fc_all[
+            df_fc_all["valid_ts"] <= t0_fc + timedelta(hours=_hours_fc)
+        ].copy()
+    else:
+        df_fc = df_fc_all.copy()
 
     # ── Métricas de instabilidade + acumulados ────────────────────────────
     if not df_fc.empty:
@@ -1341,6 +1640,13 @@ def _page_forecasts() -> None:
                           "cape_j_kg": "CAPE (J/kg)", "model_source": "Modelo"}
             disp.columns = [_rename_fc.get(c, c) for c in disp.columns]
             st.dataframe(disp, use_container_width=True, hide_index=True)
+
+        st.markdown("---")
+        st.markdown(f"### 💨 Vento — {loc}")
+        st.plotly_chart(_wind_forecast_chart(df_fc, loc), use_container_width=True)
+
+        st.markdown(f"### ☀️ Radiação Solar — {loc}")
+        st.plotly_chart(_solar_chart(df_fc, loc), use_container_width=True)
 
     # ── Comparativo dos 10 pontos NWP ────────────────────────────────────
     if not summary_df.empty:
