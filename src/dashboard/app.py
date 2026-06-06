@@ -138,6 +138,13 @@ div[data-testid="metric-container"] { background-color: #1e293b; border-radius: 
     .block-container { padding: 0.5rem; }
     div[data-testid="metric-container"] { padding: 6px; }
 }
+/* Windy period selector — pills horizontais */
+div[data-testid="stRadio"] div[role="radiogroup"] { gap: 6px; }
+/* Windy legend / card lateral */
+.windy-card {
+    background: #1e293b; border: 1px solid #334155; border-radius: 10px;
+    padding: 12px; margin: 6px 0; font-size: 0.83em; color: #cbd5e1;
+}
 </style>
 """
 
@@ -515,119 +522,328 @@ def _rain_bar_chart(df: pd.DataFrame) -> go.Figure:
 
 
 def _forecast_chart(df: pd.DataFrame, location: str) -> go.Figure:
-    """Gráfico de previsão NWP: chuva + temperatura nas próximas 7 dias."""
+    """
+    Meteograma multi-eixo estilo HCMR: chuva (barras) + temperatura + vento.
+
+    Args:
+        df: DataFrame NWP com colunas valid_ts, rain_mm, temperature, wind_speed,
+            model_source.
+        location: Nome da localidade para o título.
+
+    Returns:
+        Figura Plotly com até 3 eixos Y independentes.
+    """
     if df.empty:
         return go.Figure()
 
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
-                        subplot_titles=("Chuva prevista (mm/h)", "Temperatura (°C)"),
-                        vertical_spacing=0.08)
+    _COLORS = {"openmeteo": "#38bdf8", "noaa": "#f59e0b", "ecmwf": "#a78bfa"}
+
+    fig = go.Figure()
 
     for model, grp in df.groupby("model_source"):
-        color = {"openmeteo": "#38bdf8", "noaa": "#f59e0b",
-                 "ecmwf": "#a78bfa"}.get(model, "#94a3b8")
+        color = _COLORS.get(model, "#94a3b8")
+        grp = grp.sort_values("valid_ts")
+
         if "rain_mm" in grp.columns:
             fig.add_trace(go.Bar(
-                x=grp["valid_ts"], y=grp["rain_mm"].clip(lower=0),
-                name=f"Chuva {model}", marker_color=color, opacity=0.75,
-            ), row=1, col=1)
+                x=grp["valid_ts"],
+                y=grp["rain_mm"].clip(lower=0),
+                name=f"Chuva {model}",
+                marker_color=color,
+                opacity=0.75,
+                yaxis="y1",
+            ))
+
         if "temperature" in grp.columns:
             fig.add_trace(go.Scatter(
-                x=grp["valid_ts"], y=grp["temperature"],
-                name=f"Temp {model}", mode="lines",
-                line={"color": color, "width": 2},
-            ), row=2, col=1)
+                x=grp["valid_ts"],
+                y=grp["temperature"],
+                name=f"Temp {model}",
+                mode="lines",
+                line={"color": "#fb923c", "width": 2, "dash": "dot"},
+                yaxis="y2",
+            ))
+
+        if "wind_speed" in grp.columns:
+            fig.add_trace(go.Scatter(
+                x=grp["valid_ts"],
+                y=grp["wind_speed"],
+                name=f"Vento {model}",
+                mode="lines",
+                line={"color": "#a3e635", "width": 1.5, "dash": "dash"},
+                opacity=0.75,
+                yaxis="y3",
+            ))
 
     fig.update_layout(
-        title=f"Previsão NWP — {location}",
+        title=f"Meteograma — {location}",
         paper_bgcolor="#0f172a",
         plot_bgcolor="#1e293b",
-        font={"color": "#e2e8f0"},
-        legend={"bgcolor": "#1e293b"},
+        font={"color": "#e2e8f0", "size": 12},
+        legend={"bgcolor": "#1e293b44", "bordercolor": "#334155",
+                "borderwidth": 1, "x": 1.18, "y": 1},
         hovermode="x unified",
-        height=450,
-        margin={"t": 60, "b": 40, "l": 60, "r": 20},
+        height=480,
+        margin={"t": 60, "b": 50, "l": 60, "r": 150},
+        xaxis={"gridcolor": "#334155", "linecolor": "#334155", "tickangle": -30},
+        yaxis={
+            "title": "Chuva (mm)",
+            "titlefont": {"color": "#38bdf8"},
+            "tickfont": {"color": "#38bdf8"},
+            "gridcolor": "#334155",
+        },
+        yaxis2={
+            "title": "Temp (°C)",
+            "titlefont": {"color": "#fb923c"},
+            "tickfont": {"color": "#fb923c"},
+            "overlaying": "y",
+            "side": "right",
+            "showgrid": False,
+        },
+        yaxis3={
+            "title": "Vento (km/h)",
+            "titlefont": {"color": "#a3e635"},
+            "tickfont": {"color": "#a3e635"},
+            "overlaying": "y",
+            "side": "right",
+            "position": 0.90,
+            "showgrid": False,
+            "anchor": "free",
+        },
     )
-    fig.update_xaxes(gridcolor="#334155", linecolor="#334155")
-    fig.update_yaxes(gridcolor="#334155", linecolor="#334155")
+    return fig
+
+
+def _wind_rose(df: pd.DataFrame, location: str) -> go.Figure:
+    """
+    Rosa dos ventos estilo Windy com plotly polar, colorida por velocidade.
+
+    Args:
+        df: DataFrame NWP com colunas wind_speed e wind_direction_deg.
+        location: Nome da localidade para o título.
+
+    Returns:
+        Figura Plotly polar. Retorna figura vazia com aviso se dados insuficientes.
+    """
+    _DIRS = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
+             "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"]
+
+    fig_empty = go.Figure()
+    fig_empty.update_layout(
+        title=f"Rosa dos Ventos — {location}",
+        paper_bgcolor="#0f172a",
+        font={"color": "#e2e8f0"},
+        height=320,
+        annotations=[{"text": "Sem dados de direção", "showarrow": False,
+                      "x": 0.5, "y": 0.5, "font": {"color": "#94a3b8", "size": 14}}],
+    )
+
+    if df.empty or "wind_direction_deg" not in df.columns or "wind_speed" not in df.columns:
+        return fig_empty
+
+    df2 = df[["wind_speed", "wind_direction_deg"]].dropna().copy()
+    if len(df2) < 3:
+        return fig_empty
+
+    df2["sector"] = ((df2["wind_direction_deg"] + 11.25) % 360 // 22.5).astype(int)
+    df2["sector_name"] = df2["sector"].map(lambda i: _DIRS[i % 16])
+
+    grp = df2.groupby("sector_name").agg(
+        freq=("wind_speed", "count"),
+        speed_mean=("wind_speed", "mean"),
+    ).reset_index()
+    grp["pct"] = grp["freq"] / grp["freq"].sum() * 100
+
+    fig = go.Figure(go.Barpolar(
+        r=grp["pct"],
+        theta=grp["sector_name"],
+        marker_color=grp["speed_mean"],
+        marker_colorscale=[[0, "#1d4ed8"], [0.4, "#16a34a"],
+                           [0.75, "#ca8a04"], [1, "#dc2626"]],
+        marker_showscale=True,
+        marker_colorbar={
+            "title": "km/h", "thickness": 12,
+            "tickfont": {"color": "#e2e8f0", "size": 10},
+            "titlefont": {"color": "#e2e8f0"},
+        },
+        opacity=0.85,
+        name="Frequência (%)",
+    ))
+    fig.update_layout(
+        title=f"Rosa dos Ventos — {location}",
+        paper_bgcolor="#0f172a",
+        font={"color": "#e2e8f0"},
+        polar={
+            "bgcolor": "#1e293b",
+            "angularaxis": {"tickfont": {"size": 10, "color": "#94a3b8"},
+                            "linecolor": "#334155"},
+            "radialaxis": {"tickfont": {"size": 9, "color": "#94a3b8"},
+                           "gridcolor": "#334155", "linecolor": "#334155",
+                           "ticksuffix": "%"},
+        },
+        height=320,
+        margin={"t": 50, "b": 20, "l": 20, "r": 60},
+    )
     return fig
 
 
 def _build_map(stations_df: pd.DataFrame,
                rain_df: pd.DataFrame,
-               river_status_df: pd.DataFrame) -> Optional["folium.Map"]:
-    """Mapa Folium com estações, bolhas de chuva e segmentos de rio coloridos."""
+               river_status_df: pd.DataFrame,
+               period: str = "rain_24h") -> Optional["folium.Map"]:
+    """
+    Mapa Folium estilo Windy: círculos coloridos por chuva + marcadores de rios.
+
+    Args:
+        stations_df: DataFrame de estações (com lat/lon/source).
+        rain_df: DataFrame de acumulados de chuva por estação.
+        river_status_df: DataFrame de status atual dos rios.
+        period: Coluna de acumulado a exibir (ex: "rain_24h").
+
+    Returns:
+        Objeto folium.Map ou None se folium não estiver disponível.
+    """
     if not _FOLIUM_OK:
         return None
 
+    period_label = period.replace("rain_", "")
+
     m = folium.Map(
-        location=[-29.8, -51.5],
-        zoom_start=8,
+        location=[-29.5, -53.0],
+        zoom_start=7,
         tiles="CartoDB dark_matter",
         prefer_canvas=True,
     )
 
-    # Camada de chuva (bolhas proporcionais a rain_24h)
-    rain_layer = folium.FeatureGroup(name="Chuva 24h (bolhas)", show=True)
-    if not rain_df.empty:
+    # ── Legenda flutuante estilo Windy ──────────────────────────────────────
+    legend_html = f"""
+    <div style="position:fixed;bottom:30px;left:30px;z-index:9999;
+                background:#1e293bdd;border:1px solid #475569;border-radius:8px;
+                padding:10px 14px;font-size:12px;color:#e2e8f0;line-height:1.85;
+                backdrop-filter:blur(4px)">
+        <b style="color:#f8fafc">Chuva acumulada {period_label}</b><br>
+        <span style="color:#64748b">●</span>&nbsp;Sem dados<br>
+        <span style="color:#93c5fd">●</span>&nbsp;&lt; 5 mm<br>
+        <span style="color:#1d4ed8">●</span>&nbsp;5 – 20 mm<br>
+        <span style="color:#16a34a">●</span>&nbsp;20 – 40 mm<br>
+        <span style="color:#ca8a04">●</span>&nbsp;40 – 60 mm<br>
+        <span style="color:#dc2626">●</span>&nbsp;&gt; 60 mm
+    </div>
+    """
+    m.get_root().html.add_child(folium.Element(legend_html))
+
+    # ── Camada de chuva (círculos coloridos por intensidade) ────────────────
+    rain_layer = folium.FeatureGroup(name=f"Chuva {period_label} (círculos)", show=True)
+    if not rain_df.empty and period in rain_df.columns:
+        ts_col = next((c for c in ("max_ts", "ts", "updated_at") if c in rain_df.columns), None)
         for _, row in rain_df.iterrows():
-            r24 = row.get("rain_24h", 0) or 0
-            if r24 <= 0 or pd.isna(row.get("lat")) or pd.isna(row.get("lon")):
+            if pd.isna(row.get("lat")) or pd.isna(row.get("lon")):
                 continue
-            color = ("#38bdf8" if r24 < 20 else
-                     "#f59e0b" if r24 < 50 else
-                     "#ef4444" if r24 < 100 else "#7c3aed")
+            val    = float(row.get(period) or 0)
+            color  = _rain_color_windy(val) if val > 0 else "#64748b"
+            radius = max(8, min(45, 8 + val * 0.55))
+            name   = (row.get("station_name") or row.get("name")
+                      or str(row.get("station_id", "—")))
+            mun    = str(row.get("municipality") or "")
+            rv     = str(row.get("river") or "")
+            r1h    = float(row.get("rain_1h") or 0)
+            r6h    = float(row.get("rain_6h") or 0)
+            r24h   = float(row.get("rain_24h") or 0)
+            r72h   = float(row.get("rain_72h") or 0)
+            ts_str = ""
+            if ts_col and not pd.isna(row.get(ts_col)):
+                try:
+                    ts_str = pd.to_datetime(row[ts_col]).strftime("%d/%m %H:%M")
+                except Exception:
+                    pass
+
+            meta_line = ""
+            if mun:
+                meta_line = f"<span style='color:#94a3b8'>{mun}" + (f" · {rv}" if rv else "") + "</span><br>"
+
+            popup_html = (
+                f"<div style='font-family:sans-serif;background:#1e293b;color:#e2e8f0;"
+                f"border-radius:8px;padding:12px;min-width:180px;font-size:13px'>"
+                f"<b style='font-size:15px;color:#f8fafc'>{name}</b><br>"
+                f"{meta_line}"
+                f"<hr style='border-color:#334155;margin:6px 0'>"
+                f"<table style='width:100%;border-collapse:collapse'>"
+                f"<tr><td style='color:#94a3b8'>1h</td>"
+                f"    <td style='text-align:right;color:#38bdf8'><b>{r1h:.1f} mm</b></td></tr>"
+                f"<tr><td style='color:#94a3b8'>6h</td>"
+                f"    <td style='text-align:right;color:#38bdf8'><b>{r6h:.1f} mm</b></td></tr>"
+                f"<tr><td style='color:#94a3b8'>24h</td>"
+                f"    <td style='text-align:right;color:#38bdf8'><b>{r24h:.1f} mm</b></td></tr>"
+                f"<tr><td style='color:#94a3b8'>72h</td>"
+                f"    <td style='text-align:right;color:#38bdf8'><b>{r72h:.1f} mm</b></td></tr>"
+                f"</table>"
+                + (f"<hr style='border-color:#334155;margin:6px 0'>"
+                   f"<small style='color:#64748b'>{ts_str}</small>" if ts_str else "")
+                + "</div>"
+            )
             folium.CircleMarker(
                 location=[row["lat"], row["lon"]],
-                radius=max(4, min(30, r24 / 5)),
+                radius=radius,
                 color=color,
+                weight=1.5,
                 fill=True,
                 fill_color=color,
-                fill_opacity=0.6,
-                popup=folium.Popup(
-                    f"<b>{row.get('station_name', row['station_id'])}</b><br>"
-                    f"Chuva 24h: {r24:.1f} mm<br>"
-                    f"1h: {row.get('rain_1h', 0):.1f} | "
-                    f"6h: {row.get('rain_6h', 0):.1f} | "
-                    f"72h: {row.get('rain_72h', 0):.1f} mm",
-                    max_width=200,
-                ),
-                tooltip=f"{row.get('station_name', row['station_id'])}: {r24:.1f} mm/24h",
+                fill_opacity=0.72,
+                popup=folium.Popup(popup_html, max_width=220),
+                tooltip=f"{name}: {val:.1f} mm/{period_label}",
             ).add_to(rain_layer)
     rain_layer.add_to(m)
 
-    # Camada de rios (marcadores coloridos por status)
+    # ── Camada de rios (círculos + labels coloridos por status) ────────────
     rivers_layer = folium.FeatureGroup(name="Status dos Rios", show=True)
     if not river_status_df.empty:
         for _, row in river_status_df.iterrows():
             river = row.get("river", "")
-            cfg = RIOS_COTAS.get(river)
+            cfg   = RIOS_COTAS.get(river)
             if cfg is None:
                 continue
             status = row.get("status", "NORMAL")
-            color = STATUS_COLORS.get(status, "#22c55e")
-            level = row.get("level_m", 0) or 0
-            pct   = row.get("pct_cota_atencao", 0) or 0
+            color  = STATUS_COLORS.get(status, "#22c55e")
+            level  = float(row.get("level_m") or 0)
+            pct    = float(row.get("pct_cota_atencao") or 0)
+            popup_html = (
+                f"<div style='font-family:sans-serif;background:#1e293b;color:#e2e8f0;"
+                f"border-radius:8px;padding:12px;min-width:160px;font-size:13px'>"
+                f"<b style='font-size:15px;color:#f8fafc'>Rio {river}</b>"
+                f"<hr style='border-color:#334155;margin:6px 0'>"
+                f"<span style='color:{color};font-weight:bold;font-size:14px'>{status}</span><br>"
+                f"<span style='color:#94a3b8'>Nível:</span> <b>{level:.2f} m</b><br>"
+                f"<span style='color:#94a3b8'>% cota atenção:</span> <b>{pct:.0f}%</b>"
+                f"</div>"
+            )
+            folium.CircleMarker(
+                location=[cfg["lat"], cfg["lon"]],
+                radius=18,
+                color=color,
+                weight=3,
+                fill=True,
+                fill_color=color,
+                fill_opacity=0.30,
+                popup=folium.Popup(popup_html, max_width=200),
+                tooltip=f"Rio {river}: {level:.2f} m ({status})",
+            ).add_to(rivers_layer)
             folium.Marker(
                 location=[cfg["lat"], cfg["lon"]],
-                icon=folium.Icon(color={
-                    "NORMAL": "green", "ATENCAO": "orange",
-                    "ALERTA": "red",   "EMERGENCIA": "purple",
-                }.get(status, "green"), icon="tint", prefix="fa"),
-                popup=folium.Popup(
-                    f"<b>Rio {river}</b><br>"
-                    f"Nível: {level:.2f} m<br>"
-                    f"Status: {status}<br>"
-                    f"% cota atenção: {pct:.0f}%",
-                    max_width=200,
+                icon=folium.DivIcon(
+                    html=(
+                        f"<div style='font-size:9px;font-weight:bold;color:{color};"
+                        f"text-shadow:0 0 4px #000;white-space:nowrap;"
+                        f"margin-top:20px;margin-left:-22px'>{river}</div>"
+                    ),
+                    icon_size=(80, 14),
+                    icon_anchor=(0, 0),
                 ),
-                tooltip=f"Rio {river}: {level:.2f} m ({status})",
             ).add_to(rivers_layer)
     rivers_layer.add_to(m)
 
-    # Camada de estações INMET
+    # ── Camada de estações INMET (pontos pequenos, oculta por padrão) ──────
     inmet_layer = folium.FeatureGroup(name="Estações INMET", show=False)
-    if not stations_df.empty:
+    if not stations_df.empty and "source" in stations_df.columns:
         inmet = stations_df[stations_df["source"] == "INMET"]
         for _, row in inmet.iterrows():
             if pd.isna(row.get("lat")) or pd.isna(row.get("lon")):
@@ -639,11 +855,11 @@ def _build_map(stations_df: pd.DataFrame,
                 fill=True,
                 fill_color="#94a3b8",
                 fill_opacity=0.5,
-                tooltip=f"INMET: {row.get('name', row['station_id'])}",
+                tooltip=f"INMET: {row.get('name', row.get('station_id', '?'))}",
             ).add_to(inmet_layer)
     inmet_layer.add_to(m)
 
-    folium.LayerControl().add_to(m)
+    folium.LayerControl(collapsed=False).add_to(m)
     return m
 
 
@@ -779,10 +995,10 @@ def _build_forecast_map(summary_df: pd.DataFrame,
 def _page_overview(river_status_df: pd.DataFrame,
                    rain_df: pd.DataFrame,
                    stations_df: pd.DataFrame) -> None:
-    """Página principal: cartões de status + mapa."""
+    """Página principal: KPIs de rios + mapa estilo Windy + painel lateral com legenda."""
     st.markdown("## 🗺️ Visão Geral")
 
-    # --- Cartões de status dos rios ---
+    # ── KPIs dos rios ──────────────────────────────────────────────────────
     if river_status_df.empty:
         st.info("Nenhum dado de rios disponível. Execute o coletor ANA primeiro.")
     else:
@@ -804,23 +1020,99 @@ def _page_overview(river_status_df: pd.DataFrame,
 
     st.markdown("---")
 
-    # --- Mapa ---
-    if _FOLIUM_OK:
-        m = _build_map(stations_df, rain_df, river_status_df)
-        if m is not None:
-            with st.container():
-                st_folium(m, use_container_width=True, height=520,
-                          returned_objects=[])
-    else:
-        st.warning("Instale `streamlit-folium` para ver o mapa: `pip install streamlit-folium`")
+    # ── Seletor de período (pills horizontais) ─────────────────────────────
+    _period_opts = {
+        "1h": "rain_1h", "6h": "rain_6h", "24h": "rain_24h",
+        "48h": "rain_48h", "72h": "rain_72h",
+    }
+    periodo = st.radio(
+        "Acumulado exibido no mapa",
+        list(_period_opts.keys()),
+        index=2,
+        horizontal=True,
+    )
+    period_col = _period_opts[periodo]
 
-    # --- Resumo de chuva ---
+    # ── Layout mapa (3/4) + painel lateral (1/4) ──────────────────────────
+    col_map, col_right = st.columns([3, 1])
+
+    with col_map:
+        if _FOLIUM_OK:
+            m = _build_map(stations_df, rain_df, river_status_df, period=period_col)
+            if m is not None:
+                st_folium(m, use_container_width=True, height=560, returned_objects=[])
+        else:
+            st.warning("Instale `streamlit-folium`: `pip install streamlit-folium`")
+
+    with col_right:
+        # Legenda de chuva
+        st.markdown(
+            "<div class='windy-card'><b style='color:#f8fafc'>Chuva acumulada</b></div>",
+            unsafe_allow_html=True,
+        )
+        _scale = [
+            ("#64748b", "Sem dados"),
+            ("#93c5fd", "< 5 mm"),
+            ("#1d4ed8", "5 – 20 mm"),
+            ("#16a34a", "20 – 40 mm"),
+            ("#ca8a04", "40 – 60 mm"),
+            ("#dc2626", "> 60 mm"),
+        ]
+        for color, label in _scale:
+            st.markdown(
+                f"<div style='display:flex;align-items:center;gap:8px;margin:3px 0'>"
+                f"<span style='width:13px;height:13px;border-radius:50%;"
+                f"background:{color};flex-shrink:0;display:inline-block'></span>"
+                f"<span style='font-size:0.82em;color:#cbd5e1'>{label}</span></div>",
+                unsafe_allow_html=True,
+            )
+
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        # Legenda de status dos rios
+        st.markdown(
+            "<div class='windy-card'><b style='color:#f8fafc'>Status dos Rios</b></div>",
+            unsafe_allow_html=True,
+        )
+        for status, color in STATUS_COLORS.items():
+            emoji = STATUS_EMOJI.get(status, "⚪")
+            st.markdown(
+                f"<div style='display:flex;align-items:center;gap:8px;margin:3px 0'>"
+                f"<span style='width:13px;height:13px;border-radius:50%;"
+                f"background:{color};flex-shrink:0;display:inline-block'></span>"
+                f"<span style='font-size:0.82em;color:#cbd5e1'>{emoji} {status}</span></div>",
+                unsafe_allow_html=True,
+            )
+
+        # Cards de rios monitorados
+        if not river_status_df.empty:
+            st.markdown("<br>", unsafe_allow_html=True)
+            st.markdown(
+                "<div class='windy-card'><b style='color:#f8fafc'>Monitoramento</b></div>",
+                unsafe_allow_html=True,
+            )
+            for _, row in river_status_df.iterrows():
+                status = row.get("status", "NORMAL")
+                color  = STATUS_COLORS.get(status, "#22c55e")
+                level  = row.get("level_m") or 0.0
+                st.markdown(
+                    f"<div style='background:#1e293b;border-left:3px solid {color};"
+                    f"border-radius:6px;padding:6px 10px;margin:4px 0;font-size:0.82em'>"
+                    f"<b style='color:#f8fafc'>{row['river']}</b><br>"
+                    f"<span style='color:#94a3b8'>{level:.2f} m</span> &nbsp;"
+                    f"<span style='color:{color}'>{status}</span>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+
+    # ── Tabela top-5 acumulados ────────────────────────────────────────────
     if not rain_df.empty:
-        st.markdown("### 🌧️ Maiores acumulados 24h")
+        sort_col = period_col if period_col in rain_df.columns else "rain_24h"
+        st.markdown(f"### 🌧️ Maiores acumulados {periodo}")
         _wanted = ["station_name", "municipality", "river",
                    "rain_1h", "rain_6h", "rain_24h", "rain_72h"]
         _avail  = [c for c in _wanted if c in rain_df.columns]
-        top5 = rain_df.nlargest(5, "rain_24h")[_avail].rename(columns={
+        top5 = rain_df.nlargest(5, sort_col)[_avail].rename(columns={
             "station_name": "Estação",
             "municipality": "Município",
             "river": "Rio",
@@ -945,14 +1237,12 @@ def _page_rain(rain_df: pd.DataFrame) -> None:
 
 
 def _page_forecasts() -> None:
-    """Página de previsões NWP com mapa interativo estilo Windy + gráfico série temporal."""
+    """Página de previsões NWP: mapa Windy + meteograma multi-eixo + rosa dos ventos."""
     st.markdown("## 🔮 Previsões Meteorológicas")
 
-    # Dropdown com todos os 10 pontos NWP do config.yaml
     all_locations = [p["nome"] for p in NWP_POINTS]
     loc = st.selectbox("Localidade", all_locations, index=0)
 
-    # Carrega resumo de todos os pontos (para o mapa) e série do ponto selecionado
     @st.cache_data(ttl=600)
     def _cached_summary() -> pd.DataFrame:
         return load_all_forecasts_summary()
@@ -960,68 +1250,99 @@ def _page_forecasts() -> None:
     summary_df = _cached_summary()
     df_fc      = load_forecasts(loc)
 
-    # ── Métricas de instabilidade (ponto selecionado) ──────────────────────
+    # ── Métricas de instabilidade + acumulados ────────────────────────────
     if not df_fc.empty:
-        latest = df_fc.iloc[0]
-        cape   = latest.get("cape_j_kg")
-        li     = latest.get("lifted_index")
-        ki     = latest.get("k_index")
-        t0     = df_fc["valid_ts"].iloc[0]
+        latest   = df_fc.iloc[0]
+        cape     = latest.get("cape_j_kg")
+        li       = latest.get("lifted_index")
+        ki       = latest.get("k_index")
+        t0       = df_fc["valid_ts"].iloc[0]
         rain_6h  = df_fc[df_fc["valid_ts"] <= t0 + timedelta(hours=6)]["rain_mm"].sum()
         rain_24h = df_fc[df_fc["valid_ts"] <= t0 + timedelta(hours=24)]["rain_mm"].sum()
+        wind_max = df_fc["wind_speed"].max() if "wind_speed" in df_fc.columns else None
 
-        c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("CAPE (J/kg)",    f"{cape:.0f}"  if cape is not None else "N/D",
+        c1, c2, c3, c4, c5, c6 = st.columns(6)
+        c1.metric("CAPE (J/kg)",     f"{cape:.0f}"      if cape     is not None else "N/D",
                   help="< 1000 fraco | 1000-2500 moderado | > 2500 severo")
-        c2.metric("Lifted Index",   f"{li:.1f}"    if li   is not None else "N/D",
+        c2.metric("Lifted Index",    f"{li:.1f}"         if li       is not None else "N/D",
                   help="> 0 estável | -2 a 0 leve | < -6 severo")
-        c3.metric("K-Index",        f"{ki:.0f}"    if ki   is not None else "N/D",
+        c3.metric("K-Index",         f"{ki:.0f}"         if ki       is not None else "N/D",
                   help="< 20 baixo | 20-30 moderado | > 35 alto")
-        c4.metric("Chuva próx. 6h",  f"{rain_6h:.1f} mm"  if rain_6h  else "N/D")
-        c5.metric("Chuva próx. 24h", f"{rain_24h:.1f} mm" if rain_24h else "N/D")
+        c4.metric("Chuva 6h",        f"{rain_6h:.1f} mm" if rain_6h  else "N/D")
+        c5.metric("Chuva 24h",       f"{rain_24h:.1f} mm"if rain_24h else "N/D")
+        c6.metric("Vento máx.",      f"{wind_max:.0f} km/h" if wind_max is not None else "N/D")
     else:
         st.info(f"Sem previsões para {loc}. Execute o coletor Open-Meteo/NOAA.")
 
     st.markdown("---")
 
-    # ── Mapa Windy de previsão ─────────────────────────────────────────────
+    # ── Mapa Windy ────────────────────────────────────────────────────────
     st.markdown("### 🗺️ Chuva prevista 24h — grade RS")
 
     if _FOLIUM_OK:
         fc_map = _build_forecast_map(summary_df, loc)
         if fc_map is not None:
-            st_folium(fc_map, use_container_width=True, height=500,
-                      returned_objects=[])
+            st_folium(fc_map, use_container_width=True, height=480, returned_objects=[])
         else:
             st.info("Mapa não disponível.")
     else:
         st.warning("Instale `streamlit-folium`: `pip install streamlit-folium`")
-
-        # Fallback: tabela resumo quando folium não disponível
         if not summary_df.empty:
-            disp_sum = summary_df[["location_name", "rain_6h",
-                                   "rain_24h", "rain_48h", "temp_mean"]].copy()
-            disp_sum.columns = ["Cidade", "6h (mm)", "24h (mm)", "48h (mm)", "Temp °C"]
+            _cols_disp = [c for c in ["location_name", "rain_6h", "rain_24h",
+                                       "rain_48h", "temp_mean"] if c in summary_df.columns]
+            disp_sum = summary_df[_cols_disp].copy()
+            disp_sum.columns = ["Cidade", "6h (mm)", "24h (mm)", "48h (mm)", "Temp °C"][
+                :len(_cols_disp)]
             st.dataframe(disp_sum, use_container_width=True, hide_index=True)
 
     st.markdown("---")
 
-    # ── Gráfico série temporal (ponto selecionado) ────────────────────────
     if not df_fc.empty:
-        st.markdown(f"### 📈 Série temporal — {loc}")
-        fig = _forecast_chart(df_fc, loc)
-        st.plotly_chart(fig, use_container_width=True)
+        # ── Meteograma multi-eixo + Rosa dos ventos ───────────────────────
+        st.markdown(f"### 📈 Meteograma — {loc}")
+        fig_fc = _forecast_chart(df_fc, loc)
+        st.plotly_chart(fig_fc, use_container_width=True)
 
-        # Tabela resumida
+        col_rose, col_info = st.columns([1, 2])
+        with col_rose:
+            fig_rose = _wind_rose(df_fc, loc)
+            st.plotly_chart(fig_rose, use_container_width=True)
+        with col_info:
+            st.markdown("#### Resumo por modelo")
+            for model, grp in df_fc.groupby("model_source"):
+                r_total = grp["rain_mm"].clip(lower=0).sum() if "rain_mm" in grp.columns else 0
+                t_min   = grp["temperature"].min() if "temperature" in grp.columns else None
+                t_max   = grp["temperature"].max() if "temperature" in grp.columns else None
+                w_max   = grp["wind_speed"].max()  if "wind_speed"  in grp.columns else None
+                temp_str = f"{t_min:.0f}–{t_max:.0f} °C" if t_min is not None else "N/D"
+                wind_str = f"{w_max:.0f} km/h"            if w_max  is not None else "N/D"
+                color = {"openmeteo": "#38bdf8", "noaa": "#f59e0b",
+                         "ecmwf": "#a78bfa"}.get(model, "#94a3b8")
+                st.markdown(
+                    f"<div style='background:#1e293b;border-left:3px solid {color};"
+                    f"border-radius:6px;padding:10px 14px;margin:6px 0;font-size:0.9em'>"
+                    f"<b style='color:{color}'>{model.upper()}</b><br>"
+                    f"<span style='color:#94a3b8'>Chuva total:</span> <b>{r_total:.1f} mm</b> &nbsp;"
+                    f"<span style='color:#94a3b8'>Temp:</span> <b>{temp_str}</b> &nbsp;"
+                    f"<span style='color:#94a3b8'>Vento max:</span> <b>{wind_str}</b>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+
         with st.expander("Ver dados tabulares"):
-            disp = df_fc[["valid_ts", "rain_mm", "temperature",
-                          "wind_speed", "cape_j_kg", "model_source"]].copy()
-            disp["valid_ts"] = disp["valid_ts"].dt.strftime("%d/%m %H:%M")
-            disp.columns = ["Data/Hora", "Chuva (mm)", "Temp (°C)",
-                            "Vento (km/h)", "CAPE (J/kg)", "Modelo"]
+            _fc_cols = [c for c in ["valid_ts", "rain_mm", "temperature",
+                                     "wind_speed", "cape_j_kg", "model_source"]
+                        if c in df_fc.columns]
+            disp = df_fc[_fc_cols].copy()
+            if "valid_ts" in disp.columns:
+                disp["valid_ts"] = disp["valid_ts"].dt.strftime("%d/%m %H:%M")
+            _rename_fc = {"valid_ts": "Data/Hora", "rain_mm": "Chuva (mm)",
+                          "temperature": "Temp (°C)", "wind_speed": "Vento (km/h)",
+                          "cape_j_kg": "CAPE (J/kg)", "model_source": "Modelo"}
+            disp.columns = [_rename_fc.get(c, c) for c in disp.columns]
             st.dataframe(disp, use_container_width=True, hide_index=True)
 
-    # ── Resumo comparativo dos 10 pontos ─────────────────────────────────
+    # ── Comparativo dos 10 pontos NWP ────────────────────────────────────
     if not summary_df.empty:
         st.markdown("---")
         st.markdown("### 📊 Comparativo — 10 pontos NWP")
