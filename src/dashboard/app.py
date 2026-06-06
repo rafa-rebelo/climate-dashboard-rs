@@ -224,6 +224,17 @@ def load_rain_accumulated() -> tuple[pd.DataFrame, "DataSource"]:
     if _LOADER_OK:
         df, src = fetch_accumulated_rain()
         if not df.empty:
+            # Parquet do GitHub não inclui metadados de estação — enriquecer via DuckDB
+            if "station_name" not in df.columns:
+                stations = _query(
+                    "SELECT station_id, lat, lon, name AS station_name,"
+                    "       municipality, river FROM stations"
+                )
+                if not stations.empty:
+                    df = df.merge(stations, on="station_id", how="left")
+                else:
+                    for _col in ("lat", "lon", "station_name", "municipality", "river"):
+                        df[_col] = None
             return df, src
 
     # Fallback DuckDB
@@ -480,9 +491,11 @@ def _rain_bar_chart(df: pd.DataFrame) -> go.Figure:
     colors = ["#38bdf8", "#818cf8", "#f59e0b", "#ef4444"]
     for (col, label), color in zip(periodos, colors):
         if col in top.columns:
+            x_labels = (top["station_name"].fillna(top["station_id"])
+                        if "station_name" in top.columns else top["station_id"])
             fig.add_trace(go.Bar(
                 name=label,
-                x=top["station_name"].fillna(top["station_id"]),
+                x=x_labels,
                 y=top[col],
                 marker_color=color,
             ))
@@ -804,10 +817,10 @@ def _page_overview(river_status_df: pd.DataFrame,
     # --- Resumo de chuva ---
     if not rain_df.empty:
         st.markdown("### 🌧️ Maiores acumulados 24h")
-        top5 = rain_df.nlargest(5, "rain_24h")[
-            ["station_name", "municipality", "river",
-             "rain_1h", "rain_6h", "rain_24h", "rain_72h"]
-        ].rename(columns={
+        _wanted = ["station_name", "municipality", "river",
+                   "rain_1h", "rain_6h", "rain_24h", "rain_72h"]
+        _avail  = [c for c in _wanted if c in rain_df.columns]
+        top5 = rain_df.nlargest(5, "rain_24h")[_avail].rename(columns={
             "station_name": "Estação",
             "municipality": "Município",
             "river": "Rio",
@@ -919,11 +932,15 @@ def _page_rain(rain_df: pd.DataFrame) -> None:
 
     # Tabela completa
     with st.expander("Tabela completa"):
-        disp = rain_df[["station_name", "municipality", "river",
-                         "rain_1h", "rain_3h", "rain_6h",
-                         "rain_24h", "rain_48h", "rain_72h"]].copy()
-        disp.columns = ["Estação", "Município", "Rio",
-                        "1h", "3h", "6h", "24h", "48h", "72h"]
+        _meta   = ["station_name", "municipality", "river"]
+        _rain_c = ["rain_1h", "rain_3h", "rain_6h", "rain_24h", "rain_48h", "rain_72h"]
+        _cols   = [c for c in _meta + _rain_c if c in rain_df.columns]
+        _rename = {
+            "station_name": "Estação", "municipality": "Município", "river": "Rio",
+            "rain_1h": "1h", "rain_3h": "3h", "rain_6h": "6h",
+            "rain_24h": "24h", "rain_48h": "48h", "rain_72h": "72h",
+        }
+        disp = rain_df[_cols].rename(columns=_rename).copy()
         st.dataframe(disp, use_container_width=True, hide_index=True)
 
 
