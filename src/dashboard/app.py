@@ -406,22 +406,36 @@ def load_gpm_precip() -> pd.DataFrame:
 @st.cache_data(ttl=600)
 def load_inmet_latest() -> pd.DataFrame:
     """
-    Carrega histórico INMET e retorna leitura mais recente por estação.
+    Carrega histórico INMET, filtra leitura mais recente por estação e
+    faz merge com stations para obter lat/lon. Normaliza colunas para:
+    station_id, lat, lon, precip_mm (= rain_1h_mm), temperature, humidity.
 
     Returns:
-        DataFrame com station_id, lat, lon, precip_mm, temp_c, humidity_pct
-        (uma linha por estação, ~98 linhas).
+        DataFrame com uma linha por estação (~98 linhas) incluindo lat/lon.
     """
     if not _LOADER_OK:
         return pd.DataFrame()
-    df, _ = fetch_inmet_historico()
-    if df.empty:
-        return df
-    # Obtém leitura mais recente por estação
-    ts_col = next((c for c in ("ts", "timestamp", "date_utc") if c in df.columns), None)
+    df_h, _ = fetch_inmet_historico()
+    df_s, _ = fetch_inmet_stations()
+    if df_h.empty:
+        return pd.DataFrame()
+
+    # Leitura mais recente por estação
+    ts_col = next((c for c in ("ts", "timestamp", "date_utc") if c in df_h.columns), None)
     if ts_col:
-        df = df.sort_values(ts_col).groupby("station_id").last().reset_index()
-    return df
+        df_h = df_h.sort_values(ts_col).groupby("station_id").last().reset_index()
+
+    # Normaliza coluna de chuva para precip_mm
+    if "rain_1h_mm" in df_h.columns and "precip_mm" not in df_h.columns:
+        df_h = df_h.rename(columns={"rain_1h_mm": "precip_mm"})
+
+    # Merge com stations para obter lat/lon (sem lat/lon no histórico)
+    if not df_s.empty and "lat" not in df_h.columns:
+        station_cols = ["station_id", "lat", "lon"]
+        available    = [c for c in station_cols if c in df_s.columns]
+        df_h = df_h.merge(df_s[available], on="station_id", how="left")
+
+    return df_h
 
 
 # ---------------------------------------------------------------------------
@@ -626,22 +640,19 @@ def _forecast_chart(df: pd.DataFrame, location: str) -> go.Figure:
         margin={"t": 60, "b": 50, "l": 60, "r": 150},
         xaxis={"gridcolor": "#334155", "linecolor": "#334155", "tickangle": -30},
         yaxis={
-            "title": "Chuva (mm)",
-            "titlefont": {"color": "#38bdf8"},
+            "title": {"text": "Chuva (mm)", "font": {"color": "#38bdf8"}},
             "tickfont": {"color": "#38bdf8"},
             "gridcolor": "#334155",
         },
         yaxis2={
-            "title": "Temp (°C)",
-            "titlefont": {"color": "#fb923c"},
+            "title": {"text": "Temp (°C)", "font": {"color": "#fb923c"}},
             "tickfont": {"color": "#fb923c"},
             "overlaying": "y",
             "side": "right",
             "showgrid": False,
         },
         yaxis3={
-            "title": "Vento (km/h)",
-            "titlefont": {"color": "#a3e635"},
+            "title": {"text": "Vento (km/h)", "font": {"color": "#a3e635"}},
             "tickfont": {"color": "#a3e635"},
             "overlaying": "y",
             "side": "right",
@@ -703,7 +714,7 @@ def _wind_rose(df: pd.DataFrame, location: str) -> go.Figure:
         marker_colorbar={
             "title": "km/h", "thickness": 12,
             "tickfont": {"color": "#e2e8f0", "size": 10},
-            "titlefont": {"color": "#e2e8f0"},
+            "title": {"text": "km/h", "font": {"color": "#e2e8f0"}},
         },
         opacity=0.85,
         name="Frequência (%)",
@@ -798,30 +809,34 @@ def _build_map(stations_df: pd.DataFrame,
 
     # ── HeatMap GPM/CHIRPS ────────────────────────────────────────────────
     if layers.get("heatmap", True) and gpm_df is not None and not gpm_df.empty:
-        _gpm_valid = gpm_df.dropna(subset=["lat", "lon", "precip_mm"])
-        if not _gpm_valid.empty:
-            _max_p = _gpm_valid["precip_mm"].max()
-            if _max_p > 0:
+        _glat = next((c for c in gpm_df.columns if c.lower() in
+                      ("lat", "latitude", "y", "lat_center")), None)
+        _glon = next((c for c in gpm_df.columns if c.lower() in
+                      ("lon", "longitude", "x", "lon_center")), None)
+        _gval = next((c for c in gpm_df.columns if c.lower() in
+                      ("precip_mm", "precip", "precipitation", "rain_mm")), None)
+        if _glat and _glon and _gval:
+            _gpm_valid = gpm_df.dropna(subset=[_glat, _glon, _gval])
+            if not _gpm_valid.empty:
+                _max_p = float(_gpm_valid[_gval].max())
+                _norm  = _max_p if _max_p > 0 else 1.0
                 heat_data = [
-                    [float(r.lat), float(r.lon),
-                     float(r.precip_mm) / _max_p]
-                    for r in _gpm_valid.itertuples()
+                    [float(r[_glat]), float(r[_glon]),
+                     float(r[_gval]) / _norm]
+                    for _, r in _gpm_valid.iterrows()
                 ]
-            else:
-                heat_data = [[float(r.lat), float(r.lon), 0.0]
-                             for r in _gpm_valid.itertuples()]
-            _FoliumHeatMap(
-                heat_data,
-                gradient={
-                    "0.0": "#313695", "0.2": "#4575b4", "0.4": "#74add1",
-                    "0.6": "#abd9e9", "0.7": "#fee090", "0.8": "#f46d43",
-                    "0.9": "#d73027", "1.0": "#a50026",
-                },
-                radius=15,
-                blur=20,
-                min_opacity=0.3,
-                name="HeatMap GPM/CHIRPS",
-            ).add_to(m)
+                _FoliumHeatMap(
+                    heat_data,
+                    gradient={
+                        "0.0": "#313695", "0.2": "#4575b4", "0.4": "#74add1",
+                        "0.6": "#abd9e9", "0.7": "#fee090", "0.8": "#f46d43",
+                        "0.9": "#d73027", "1.0": "#a50026",
+                    },
+                    radius=15,
+                    blur=20,
+                    min_opacity=0.3,
+                    name="HeatMap GPM/CHIRPS",
+                ).add_to(m)
 
     # ── Camada estações INMET (círculos coloridos por intensidade) ──────────
     rain_layer = folium.FeatureGroup(
@@ -940,37 +955,48 @@ def _build_map(stations_df: pd.DataFrame,
     )
     _inmet_src = inmet_df if (inmet_df is not None and not inmet_df.empty) else None
     if _inmet_src is not None:
-        for row in _inmet_src.itertuples():
-            if pd.isna(row.lat) or pd.isna(row.lon):
-                continue
-            mm    = float(getattr(row, "precip_mm", 0) or 0)
-            color = _inmet_rain_color(mm)
-            rad   = max(6, min(25, 6 + mm * 0.32))
-            name  = str(getattr(row, "station_id", "?"))
-            folium.CircleMarker(
-                location=[row.lat, row.lon],
-                radius=rad,
-                color=color,
-                weight=0,
-                fill=True,
-                fill_color=color,
-                fill_opacity=0.85,
-                tooltip=f"INMET {name}: {mm:.1f} mm",
-            ).add_to(inmet_layer)
+        # Detecção automática de colunas lat/lon/precip
+        _ilat = next((c for c in _inmet_src.columns if c.lower() in
+                      ("lat", "latitude", "y")), None)
+        _ilon = next((c for c in _inmet_src.columns if c.lower() in
+                      ("lon", "longitude", "x")), None)
+        _imm  = next((c for c in _inmet_src.columns if c.lower() in
+                      ("precip_mm", "rain_1h_mm", "rain_mm", "precip")), None)
+        if _ilat and _ilon:
+            for _, row in _inmet_src.iterrows():
+                if pd.isna(row.get(_ilat)) or pd.isna(row.get(_ilon)):
+                    continue
+                mm    = float(row.get(_imm) or 0) if _imm else 0.0
+                color = _inmet_rain_color(mm)
+                rad   = max(6, min(25, 6 + mm * 0.32))
+                sid   = str(row.get("station_id", "?"))
+                folium.CircleMarker(
+                    location=[float(row[_ilat]), float(row[_ilon])],
+                    radius=rad,
+                    color=color,
+                    weight=0,
+                    fill=True,
+                    fill_color=color,
+                    fill_opacity=0.85,
+                    tooltip=f"INMET {sid}: {mm:.1f} mm",
+                ).add_to(inmet_layer)
     elif not stations_df.empty and "source" in stations_df.columns:
-        for row in stations_df[stations_df["source"] == "INMET"].itertuples():
-            if pd.isna(row.lat) or pd.isna(row.lon):
-                continue
-            folium.CircleMarker(
-                location=[row.lat, row.lon],
-                radius=4,
-                color="#94a3b8",
-                weight=0,
-                fill=True,
-                fill_color="#94a3b8",
-                fill_opacity=0.5,
-                tooltip=f"INMET: {getattr(row, 'name', getattr(row, 'station_id', '?'))}",
-            ).add_to(inmet_layer)
+        _slat = next((c for c in stations_df.columns if c.lower() in ("lat", "latitude")), None)
+        _slon = next((c for c in stations_df.columns if c.lower() in ("lon", "longitude")), None)
+        if _slat and _slon:
+            for _, row in stations_df[stations_df["source"] == "INMET"].iterrows():
+                if pd.isna(row.get(_slat)) or pd.isna(row.get(_slon)):
+                    continue
+                folium.CircleMarker(
+                    location=[float(row[_slat]), float(row[_slon])],
+                    radius=4,
+                    color="#94a3b8",
+                    weight=0,
+                    fill=True,
+                    fill_color="#94a3b8",
+                    fill_opacity=0.5,
+                    tooltip=f"INMET: {row.get('name', row.get('station_id', '?'))}",
+                ).add_to(inmet_layer)
     inmet_layer.add_to(m)
 
     folium.LayerControl(collapsed=False).add_to(m)
@@ -1433,11 +1459,12 @@ def _wind_forecast_chart(df: pd.DataFrame, location: str) -> go.Figure:
         legend={"bgcolor": "rgba(30,41,59,0.27)"},
         title={"text": f"Vento — {location}", "font": {"size": 14, "color": "#f8fafc"}},
         xaxis={"gridcolor": "#334155"},
-        yaxis={"title": "km/h", "gridcolor": "#334155", "titlefont": {"color": "#4ade80"},
-               "tickfont": {"color": "#4ade80"}},
-        yaxis2={"title": "Direção (°)", "overlaying": "y", "side": "right",
+        yaxis={"title": {"text": "km/h", "font": {"color": "#4ade80"}},
+               "gridcolor": "#334155", "tickfont": {"color": "#4ade80"}},
+        yaxis2={"title": {"text": "Direção (°)", "font": {"color": "#94a3b8"}},
+                "overlaying": "y", "side": "right",
                 "range": [0, 360], "showgrid": False,
-                "titlefont": {"color": "#94a3b8"}, "tickfont": {"color": "#94a3b8"}},
+                "tickfont": {"color": "#94a3b8"}},
     )
     if not has_speed and not has_dir:
         fig.add_annotation(text="Dados de vento indisponíveis",
@@ -1503,8 +1530,8 @@ def _solar_chart(df: pd.DataFrame, location: str) -> go.Figure:
         legend={"bgcolor": "rgba(30,41,59,0.27)"},
         title={"text": f"Radiação Solar — {location}", "font": {"size": 14, "color": "#f8fafc"}},
         xaxis={"gridcolor": "#334155"},
-        yaxis={"title": "W/m²", "gridcolor": "#334155",
-               "titlefont": {"color": "#fbbf24"}, "tickfont": {"color": "#fbbf24"}},
+        yaxis={"title": {"text": "W/m²", "font": {"color": "#fbbf24"}},
+               "gridcolor": "#334155", "tickfont": {"color": "#fbbf24"}},
     )
     if not rad_col:
         fig.add_annotation(text="Dados de radiação solar indisponíveis",
