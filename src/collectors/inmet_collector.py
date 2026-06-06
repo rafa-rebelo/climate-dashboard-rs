@@ -3,17 +3,27 @@ Agente 1 — Arquiteto de Dados
 Coletor INMET — estações meteorológicas automáticas do RS.
 
 Coleta via API pública apitempo.inmet.gov.br (sem token):
-  - Inventário das ~500 estações automáticas do RS
-  - Dados horários das últimas 24h por estação
-  - Persiste em DuckDB (tabelas stations + rain_readings) e Parquet
+  - Inventário das ~98 estações automáticas RS (/estacoes/T)
+  - Dados horários por estação (/estacao/dados/{data}/{CD}) — requer IP BR
+  - Dados históricos via ZIP público (sem restrição de IP):
+    https://portal.inmet.gov.br/uploads/dadoshistoricos/{ano}.zip
+
+Formato CSV INMET histórico:
+  Linhas 0-7 : metadados (REGIAO, UF, ESTACAO, CODIGO, LAT, LON, ALT, FUNDACAO)
+  Linha  8   : cabeçalho das colunas (sep=';')
+  Linha  9+  : dados horários (encoding=latin-1)
+  Timestamp  : Data (YYYY-MM-DD) + Hora UTC (HHMM UTC)
+  Colunas RS : PRECIPITACAO, PRESSAO, TEMPERATURA_AR, UMIDADE, VENTO_DIR, VENTO_VEL
 """
 
 from __future__ import annotations
 
 import hashlib
+import io
 import os
 import sys
 import time
+import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -39,12 +49,41 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 _BASE_URL    = "https://apitempo.inmet.gov.br"
+_HIST_BASE   = "https://portal.inmet.gov.br/uploads/dadoshistoricos"
 _ROOT        = Path(__file__).resolve().parents[2]
 _PARQUET_DIR = _ROOT / "data" / "processed"
+_RAW_DIR     = _ROOT / "data" / "raw"
 _OUT_PARQUET = _PARQUET_DIR / "inmet_hourly.parquet"
 _INV_PARQUET = _PARQUET_DIR / "inmet_stations_rs.parquet"
+_HIST_PARQUET = _PARQUET_DIR / "inmet_historico_rs.parquet"
 _CACHE_TTL_S = 600   # 10 minutos
 _DB_PATH     = Path(os.getenv("DB_PATH", str(_ROOT / "data" / "climate.duckdb")))
+
+
+# ---------------------------------------------------------------------------
+# Utilitários de conversão (módulo-level para uso em todas as funções)
+# ---------------------------------------------------------------------------
+
+def _safe_float(value: object) -> float | None:
+    """
+    Converte valor para float tolerando vírgula decimal, None e -9999.
+
+    Args:
+        value: Qualquer valor recebido de CSV ou API.
+
+    Returns:
+        Float ou None se a conversão falhar.
+    """
+    if value is None:
+        return None
+    s = str(value).strip().replace(",", ".")
+    if s in ("", "null", "NULL", "None", "-9999", "-9999.0", "nan"):
+        return None
+    try:
+        return float(s)
+    except (ValueError, TypeError):
+        return None
+
 
 # Colunas da API → padrão interno
 # Confirmados em /estacoes/T e /estacao/dados/{CD_ESTACAO}
@@ -586,6 +625,321 @@ def collect_inmet(
 
 
 # ---------------------------------------------------------------------------
+# Coleta histórica via ZIP público (sem geo-restrição)
+# ---------------------------------------------------------------------------
+
+def _download_zip_inmet(year: int) -> bytes:
+    """
+    Baixa o ZIP histórico INMET do ano especificado.
+
+    URL pública, sem autenticação, sem geo-restrição.
+    Arquivo de ~20-80 MB dependendo do ano.
+
+    Args:
+        year: Ano de referência (ex: 2026).
+
+    Returns:
+        Bytes do arquivo ZIP.
+
+    Raises:
+        RuntimeError: Se o download falhar após retries.
+    """
+    url = f"{_HIST_BASE}/{year}.zip"
+    logger.info(f"INMET histórico: baixando {url} ...")
+
+    try:
+        resp = niquests.get(url, timeout=120, stream=True)
+    except Exception as exc:
+        raise RuntimeError(f"Falha ao baixar ZIP INMET {year}: {exc}") from exc
+
+    if resp.status_code != 200:
+        raise RuntimeError(
+            f"ZIP INMET {year}: HTTP {resp.status_code} → {url}"
+        )
+
+    chunks: list[bytes] = []
+    total = 0
+    for chunk in resp.iter_content(chunk_size=1024 * 256):  # 256 KB chunks
+        if chunk:
+            chunks.append(chunk)
+            total += len(chunk)
+
+    data = b"".join(chunks)
+    logger.info(f"  ZIP baixado: {len(data) / 1024 / 1024:.1f} MB")
+    return data
+
+
+def _parse_inmet_csv(
+    csv_bytes: bytes,
+    filename: str,
+) -> tuple[dict, pd.DataFrame]:
+    """
+    Parseia um CSV INMET histórico retornando metadados da estação e dados horários.
+
+    Formato esperado:
+      Linhas 0-7 : metadados (key;value separados por ';')
+      Linha  8   : cabeçalho de colunas
+      Linha  9+  : dados horários
+
+    Args:
+        csv_bytes: Conteúdo bruto do arquivo CSV.
+        filename: Nome do arquivo (para logs).
+
+    Returns:
+        Tupla (station_meta dict, DataFrame de leituras).
+        DataFrame vazio se o arquivo não for RS ou estiver corrompido.
+    """
+    try:
+        text = csv_bytes.decode("latin-1")
+    except UnicodeDecodeError:
+        text = csv_bytes.decode("utf-8", errors="replace")
+
+    lines = text.splitlines()
+    if len(lines) < 10:
+        return {}, pd.DataFrame()
+
+    # Lê metadados das 8 primeiras linhas
+    meta: dict[str, str] = {}
+    for line in lines[:8]:
+        parts = line.split(";")
+        if len(parts) >= 2:
+            key = parts[0].strip().rstrip(":").upper()
+            val = parts[1].strip()
+            meta[key] = val
+
+    # Filtra apenas RS
+    uf = meta.get("UF", "").strip().upper()
+    if uf != "RS":
+        return {}, pd.DataFrame()
+
+    station_meta = {
+        "station_id":  meta.get("CODIGO (WMO)", "").strip(),
+        "name":        meta.get("ESTACAO", "").strip().title(),
+        "lat":         _safe_float(meta.get("LATITUDE", "")),
+        "lon":         _safe_float(meta.get("LONGITUDE", "")),
+        "elevation_m": _safe_float(meta.get("ALTITUDE", "")),
+        "state":       "RS",
+        "source":      "INMET",
+        "active":      True,
+    }
+
+    if not station_meta["station_id"]:
+        # Tenta extrair do nome do arquivo: INMET_S_RS_A826_...
+        parts = filename.replace(".CSV", "").replace(".csv", "").split("_")
+        if len(parts) >= 4:
+            station_meta["station_id"] = parts[3]
+
+    # Parseia dados (skiprows=8 → linha 8 é o header)
+    try:
+        df = pd.read_csv(
+            io.StringIO(text),
+            sep=";",
+            skiprows=8,
+            encoding="latin-1",
+            decimal=",",
+            na_values=["", "-9999", "-9999.0", "null", "NULL"],
+        )
+    except Exception as exc:
+        logger.debug(f"  {filename}: erro ao parsear CSV — {exc}")
+        return station_meta, pd.DataFrame()
+
+    if df.empty:
+        return station_meta, pd.DataFrame()
+
+    # Normaliza nomes de colunas — remove acentos e caracteres especiais
+    col_map: dict[str, str] = {}
+    for col in df.columns:
+        col_clean = col.strip()
+        col_upper = col_clean.upper()
+        if "DATA" in col_upper and "HORA" not in col_upper:
+            col_map[col] = "data_str"
+        elif "HORA" in col_upper and "UTC" in col_upper:
+            col_map[col] = "hora_str"
+        elif "PRECIPITA" in col_upper and "TOTAL" in col_upper:
+            col_map[col] = "rain_1h_mm"
+        elif "PRESSAO" in col_upper or "PRESS" in col_upper and "NIVEL" in col_upper:
+            if "rain_1h_mm" in col_map.values():  # primeira coluna de pressão
+                col_map[col] = "pressure_hpa"
+        elif "TEMPERATURA DO AR" in col_upper or "BULBO SECO" in col_upper:
+            col_map[col] = "temperature"
+        elif "UMIDADE RELATIVA DO AR" in col_upper or ("UMIDADE" in col_upper and "HORARIA" in col_upper.replace("Á", "A").replace("Â", "A")):
+            col_map[col] = "humidity"
+        elif "VENTO" in col_upper and "DIRE" in col_upper:
+            col_map[col] = "wind_dir"
+        elif "VENTO" in col_upper and "VELOCIDADE" in col_upper and "HORARIA" in col_upper.replace("Á", "A").replace("Â", "A"):
+            col_map[col] = "wind_speed"
+
+    df = df.rename(columns=col_map)
+
+    # Garante colunas mínimas para timestamp
+    if "data_str" not in df.columns or "hora_str" not in df.columns:
+        # Tenta identificar por posição (Data = col 0, Hora = col 1)
+        if len(df.columns) >= 2:
+            df = df.rename(columns={df.columns[0]: "data_str",
+                                     df.columns[1]: "hora_str"})
+        else:
+            return station_meta, pd.DataFrame()
+
+    # Constrói timestamp UTC
+    def _parse_ts(row: pd.Series) -> pd.Timestamp | None:
+        try:
+            hora = str(row["hora_str"]).replace(" UTC", "").strip().zfill(4)
+            ts_str = f"{row['data_str']} {hora[:2]}:{hora[2:]}"
+            return pd.Timestamp(ts_str, tz="UTC")
+        except (ValueError, TypeError):
+            return None
+
+    df["ts"] = df.apply(_parse_ts, axis=1)
+    df = df.dropna(subset=["ts"])
+    df["station_id"] = station_meta["station_id"]
+    df["source"] = "INMET"
+
+    # Mantém só colunas relevantes
+    keep = ["station_id", "ts", "rain_1h_mm", "temperature",
+            "humidity", "pressure_hpa", "wind_speed", "wind_dir", "source"]
+    df = df[[c for c in keep if c in df.columns]].copy()
+
+    return station_meta, df
+
+
+def collect_historico_rs(
+    year: int | None = None,
+    days_back: int = 30,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Coleta dados históricos INMET RS via ZIP público — sem geo-restrição.
+
+    Baixa o ZIP anual do INMET, extrai em memória, filtra estações RS,
+    parseia os CSVs e retorna os últimos `days_back` dias de dados.
+
+    Salva:
+      - data/processed/inmet_historico_rs.parquet  (leituras)
+      - data/processed/inmet_stations_rs.parquet   (metadados estações)
+      - data/raw/inmet_stations_rs.parquet          (cópia raw)
+
+    Args:
+        year: Ano do ZIP (padrão: ano atual).
+        days_back: Quantos dias para trás filtrar (padrão 30).
+
+    Returns:
+        Tupla (df_stations, df_leituras). Ambos podem ser vazios em caso de falha.
+
+    Raises:
+        RuntimeError: Se o download do ZIP falhar.
+    """
+    if year is None:
+        year = datetime.now(tz=timezone.utc).year
+
+    t0 = datetime.now(tz=timezone.utc)
+    logger.info("=" * 60)
+    logger.info(f"INMET Histórico {year} — coleta via ZIP público RS")
+    logger.info(f"  Janela: últimos {days_back} dias")
+    logger.info("=" * 60)
+
+    # Download
+    zip_bytes = _download_zip_inmet(year)
+
+    # Abre ZIP em memória
+    cutoff = (datetime.now(tz=timezone.utc) - timedelta(days=days_back))
+    cutoff_naive = cutoff.replace(tzinfo=None)
+
+    stations_meta: list[dict] = []
+    all_frames: list[pd.DataFrame] = []
+    rs_files = ok = skip = err = 0
+
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        all_names = zf.namelist()
+        logger.info(f"  ZIP: {len(all_names)} arquivos totais")
+
+        for name in all_names:
+            # Filtra apenas CSVs RS pelo nome do arquivo
+            upper = name.upper()
+            if not upper.endswith(".CSV"):
+                continue
+
+            # Formato: INMET_S_RS_A826_... ou INMET_CO_RS_...
+            parts = upper.replace(".CSV", "").split("_")
+            is_rs = (
+                len(parts) >= 3 and parts[2] == "RS"
+            ) or "_RS_" in upper
+
+            if not is_rs:
+                skip += 1
+                continue
+
+            rs_files += 1
+            try:
+                csv_bytes = zf.read(name)
+                station_meta, df = _parse_inmet_csv(csv_bytes, name)
+
+                if df.empty:
+                    continue
+
+                # Filtra últimos N dias
+                if "ts" in df.columns:
+                    ts_naive = pd.to_datetime(df["ts"]).dt.tz_localize(None)
+                    df = df[ts_naive >= cutoff_naive]
+
+                if not df.empty:
+                    all_frames.append(df)
+                    ok += 1
+
+                if station_meta and station_meta.get("station_id"):
+                    stations_meta.append(station_meta)
+
+            except Exception as exc:
+                logger.warning(f"  {name}: erro — {exc}")
+                err += 1
+
+    logger.info(
+        f"  CSV processados: {rs_files} RS | {ok} com dados | "
+        f"{skip} pulados | {err} erros"
+    )
+
+    # Consolida estações
+    df_stations = pd.DataFrame(stations_meta).drop_duplicates("station_id") \
+        if stations_meta else pd.DataFrame()
+
+    # Consolida leituras
+    if not all_frames:
+        logger.warning("  Nenhuma leitura extraída do ZIP histórico")
+        df_leituras = pd.DataFrame()
+    else:
+        df_leituras = pd.concat(all_frames, ignore_index=True)
+        df_leituras = df_leituras.drop_duplicates(subset=["station_id", "ts"])
+        logger.success(
+            f"  Total leituras RS (últimos {days_back}d): {len(df_leituras)} "
+            f"| {df_leituras['station_id'].nunique() if not df_leituras.empty else 0} estações"
+        )
+
+    # Salva parquets
+    _PARQUET_DIR.mkdir(parents=True, exist_ok=True)
+    _RAW_DIR.mkdir(parents=True, exist_ok=True)
+
+    if not df_leituras.empty:
+        df_leituras.to_parquet(_HIST_PARQUET, index=False)
+        logger.info(f"  Salvo: {_HIST_PARQUET}")
+
+    if not df_stations.empty:
+        df_stations.to_parquet(_INV_PARQUET, index=False)
+        df_stations.to_parquet(_RAW_DIR / "inmet_stations_rs.parquet", index=False)
+        logger.info(f"  Salvo: {_INV_PARQUET} ({len(df_stations)} estações RS)")
+
+    # Upsert DuckDB
+    counts = upsert_inmet_duckdb(df_stations, df_leituras)
+
+    duration = (datetime.now(tz=timezone.utc) - t0).total_seconds()
+    logger.info("=" * 60)
+    logger.success(
+        f"INMET Histórico — concluído em {duration:.1f}s | "
+        f"{counts['stations']} estações | {counts['rain_readings']} leituras DuckDB"
+    )
+    logger.info("=" * 60)
+
+    return df_stations, df_leituras
+
+
+# ---------------------------------------------------------------------------
 # Standalone
 # ---------------------------------------------------------------------------
 
@@ -604,45 +958,53 @@ if __name__ == "__main__":
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Modos de operação:
-  --mode=full       Inventário + dados horários (requer IP brasileiro)
-  --mode=inventory  Apenas inventário de estações (funciona globalmente)
-  --mode=hourly     Apenas dados horários, assume inventário em cache
+  --mode=historico  ZIP público anual — sem geo-restrição (GitHub Actions)
+  --mode=inventory  Apenas inventário via API (funciona globalmente)
+  --mode=full       Inventário + dados horários via API (requer IP BR)
+  --mode=hourly     Só dados horários via API (requer IP BR)
 
 Exemplos:
+  python -m collectors.inmet_collector --mode=historico
+  python -m collectors.inmet_collector --mode=historico --dias=7
   python -m collectors.inmet_collector --mode=inventory
-  python -m collectors.inmet_collector --mode=full --dias=7
   python -m collectors.inmet_collector --mode=full --max=10
         """,
     )
     parser.add_argument(
         "--mode",
-        choices=["full", "inventory", "hourly"],
-        default="full",
-        help="Modo de coleta (padrão: full)",
+        choices=["full", "inventory", "hourly", "historico"],
+        default="historico",
+        help="Modo de coleta (padrão: historico)",
     )
-    parser.add_argument("--dias",  type=int, default=0,
-                        help="Dias para trás (0 = apenas última hora, padrão)")
+    parser.add_argument("--dias",  type=int, default=30,
+                        help="Dias para trás — usado em --mode=historico (padrão 30)")
+    parser.add_argument("--ano",   type=int, default=None,
+                        help="Ano do ZIP histórico (padrão: ano atual)")
     parser.add_argument("--max",   type=int, default=None,
-                        help="Limite de estacoes para teste (padrao: todas)")
+                        help="Limite de estacoes para teste com --mode=full")
     parser.add_argument("--force-inv", action="store_true",
                         help="Forca atualizacao do inventario")
     args = parser.parse_args()
 
+    if args.mode == "historico":
+        df_st, df_leit = collect_historico_rs(year=args.ano, days_back=args.dias)
+        print("\n--- INMET Histórico RS ---")
+        print(f"  estacoes_rs: {len(df_st)}")
+        print(f"  leituras:    {len(df_leit)}")
+        print(f"  parquet:     {_HIST_PARQUET}")
+        sys.exit(0)
+
     if args.mode == "inventory":
-        # Coleta apenas inventário — funciona de qualquer IP
         client  = INMETClient()
         inv     = coletar_inventario_rs(client, force=args.force_inv)
         counts  = upsert_inmet_duckdb(inv, pd.DataFrame())
-        print(f"\n--- Inventário INMET RS ---")
-        print(f"  estacoes: {len(inv)}")
-        n_op = inv['active'].sum() if 'active' in inv.columns else len(inv)
-        print(f"  operantes: {n_op}")
-        print(f"  salvo em: {_INV_PARQUET}")
+        print("\n--- Inventário INMET RS ---")
+        print(f"  estacoes:        {len(inv)}")
+        n_op = inv["active"].sum() if "active" in inv.columns else len(inv)
+        print(f"  operantes:       {n_op}")
+        print(f"  salvo em:        {_INV_PARQUET}")
         print(f"  DuckDB stations: {counts['stations']}")
         sys.exit(0)
-
-    # --mode=hourly: pula inventário, usa cache existente
-    skip_inv = (args.mode == "hourly")
 
     result = collect_inmet(
         dias_back=args.dias,
