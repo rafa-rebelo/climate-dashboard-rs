@@ -429,11 +429,15 @@ def load_inmet_latest() -> pd.DataFrame:
     if "rain_1h_mm" in df_h.columns and "precip_mm" not in df_h.columns:
         df_h = df_h.rename(columns={"rain_1h_mm": "precip_mm"})
 
-    # Merge com stations para obter lat/lon (sem lat/lon no histórico)
-    if not df_s.empty and "lat" not in df_h.columns:
-        station_cols = ["station_id", "lat", "lon"]
-        available    = [c for c in station_cols if c in df_s.columns]
-        df_h = df_h.merge(df_s[available], on="station_id", how="left")
+    # Merge com stations para lat/lon + nome + altitude
+    if not df_s.empty:
+        want = ["station_id", "lat", "lon", "name", "elevation_m"]
+        avail = [c for c in want if c in df_s.columns]
+        # Só faz merge das colunas que ainda não existem
+        new_cols = [c for c in avail if c != "station_id" and c not in df_h.columns]
+        if new_cols:
+            df_h = df_h.merge(df_s[["station_id"] + new_cols],
+                              on="station_id", how="left")
 
     return df_h
 
@@ -817,26 +821,49 @@ def _build_map(stations_df: pd.DataFrame,
                       ("precip_mm", "precip", "precipitation", "rain_mm")), None)
         if _glat and _glon and _gval:
             _gpm_valid = gpm_df.dropna(subset=[_glat, _glon, _gval])
-            if not _gpm_valid.empty:
-                _max_p = float(_gpm_valid[_gval].max())
-                _norm  = _max_p if _max_p > 0 else 1.0
+            _max_p = float(_gpm_valid[_gval].max()) if not _gpm_valid.empty else 0.0
+            if _max_p > 0:
+                # Normaliza por percentil 95 para não deixar outliers esmagar o gradiente
+                _norm = float(_gpm_valid[_gval].quantile(0.95))
+                if _norm <= 0:
+                    _norm = _max_p
                 heat_data = [
                     [float(r[_glat]), float(r[_glon]),
-                     float(r[_gval]) / _norm]
+                     min(float(r[_gval]) / _norm, 1.0)]
                     for _, r in _gpm_valid.iterrows()
+                    if float(r[_gval]) > 0
                 ]
-                _FoliumHeatMap(
-                    heat_data,
-                    gradient={
-                        "0.0": "#313695", "0.2": "#4575b4", "0.4": "#74add1",
-                        "0.6": "#abd9e9", "0.7": "#fee090", "0.8": "#f46d43",
-                        "0.9": "#d73027", "1.0": "#a50026",
-                    },
-                    radius=15,
-                    blur=20,
-                    min_opacity=0.3,
-                    name="HeatMap GPM/CHIRPS",
-                ).add_to(m)
+                if heat_data:
+                    _FoliumHeatMap(
+                        heat_data,
+                        gradient={
+                            "0.0": "#313695", "0.3": "#4575b4", "0.5": "#abd9e9",
+                            "0.7": "#fee090", "0.85": "#f46d43", "1.0": "#d73027",
+                        },
+                        radius=20,
+                        blur=25,
+                        min_opacity=0.5,
+                        max_zoom=10,
+                        name="HeatMap GPM/CHIRPS",
+                    ).add_to(m)
+            else:
+                # Período sem precipitação — aviso flutuante no mapa
+                _ts_str = ""
+                if "timestamp" in gpm_df.columns:
+                    try:
+                        _ts_str = pd.to_datetime(gpm_df["timestamp"].iloc[0]).strftime("%d/%m/%Y")
+                    except Exception:
+                        pass
+                _dry_html = (
+                    f"<div style='position:fixed;top:70px;left:50%;transform:translateX(-50%);"
+                    f"z-index:9999;background:#1e293bdd;border:1px solid #475569;"
+                    f"border-radius:8px;padding:8px 14px;font-size:12px;color:#94a3b8;"
+                    f"pointer-events:none;backdrop-filter:blur(4px)'>"
+                    f"🌤️ GPM/CHIRPS: sem precipitação no RS"
+                    + (f" ({_ts_str})" if _ts_str else "")
+                    + "</div>"
+                )
+                m.get_root().html.add_child(folium.Element(_dry_html))
 
     # ── Camada estações INMET (círculos coloridos por intensidade) ──────────
     rain_layer = folium.FeatureGroup(
@@ -910,19 +937,32 @@ def _build_map(stations_df: pd.DataFrame,
             cfg   = RIOS_COTAS.get(river)
             if cfg is None:
                 continue
-            status = row.get("status", "NORMAL")
-            color  = STATUS_COLORS.get(status, "#22c55e")
-            level  = float(row.get("level_m") or 0)
-            pct    = float(row.get("pct_cota_atencao") or 0)
+            status    = row.get("status", "NORMAL")
+            color     = STATUS_COLORS.get(status, "#22c55e")
+            level     = float(row.get("level_m") or 0)
+            pct       = float(row.get("pct_cota_atencao") or 0)
+            cota_at   = float(cfg.get("atencao", cfg.get("cota_atencao", 0)))
+            ts_rio    = row.get("updated_at") or row.get("ts") or row.get("timestamp")
+            ts_r_str  = ""
+            if ts_rio is not None:
+                try:
+                    ts_r_str = pd.to_datetime(ts_rio).strftime("%d/%m %H:%M")
+                except Exception:
+                    pass
+            emoji_st  = STATUS_EMOJI.get(status, "⚪")
             popup_html = (
-                f"<div style='font-family:sans-serif;background:#1e293b;color:#e2e8f0;"
-                f"border-radius:8px;padding:12px;min-width:160px;font-size:13px'>"
-                f"<b style='font-size:15px;color:#f8fafc'>Rio {river}</b>"
+                f"<div style='font-family:sans-serif;background:#1a1a2e;color:#e2e8f0;"
+                f"border-radius:8px;padding:12px;min-width:180px;font-size:12px'>"
+                f"<b style='font-size:15px;color:#f8fafc'>🌊 Rio {river}</b>"
                 f"<hr style='border-color:#334155;margin:6px 0'>"
-                f"<span style='color:{color};font-weight:bold;font-size:14px'>{status}</span><br>"
-                f"<span style='color:#94a3b8'>Nível:</span> <b>{level:.2f} m</b><br>"
-                f"<span style='color:#94a3b8'>% cota atenção:</span> <b>{pct:.0f}%</b>"
-                f"</div>"
+                f"📏 Nível: <b style='color:#38bdf8'>{level:.2f} m</b><br>"
+                f"🎯 Cota atenção: <b>{cota_at:.1f} m</b><br>"
+                f"📊 {pct:.0f}% da cota<br>"
+                f"🚦 Status: <b style='color:{color}'>{emoji_st} {status}</b>"
+                + (f"<hr style='border-color:#334155;margin:6px 0'>"
+                   f"<span style='color:#64748b;font-size:11px'>🕐 {ts_r_str}</span>"
+                   if ts_r_str else "")
+                + "</div>"
             )
             folium.CircleMarker(
                 location=[cfg["lat"], cfg["lon"]],
@@ -970,6 +1010,37 @@ def _build_map(stations_df: pd.DataFrame,
                 color = _inmet_rain_color(mm)
                 rad   = max(6, min(25, 6 + mm * 0.32))
                 sid   = str(row.get("station_id", "?"))
+                sname = str(row.get("name", sid))
+                alt   = row.get("elevation_m")
+                temp  = row.get("temperature")
+                wind  = row.get("wind_speed")
+                ts_r  = row.get("ts")
+                mm_str   = f"{mm:.1f} mm"    if not pd.isna(mm)   else "Sem dados"
+                temp_str = f"{temp:.1f} °C"  if temp is not None and not pd.isna(temp)  else "—"
+                wind_str = f"{wind:.1f} km/h" if wind is not None and not pd.isna(wind)  else "—"
+                alt_str  = f"{alt:.0f} m"    if alt  is not None and not pd.isna(alt)   else "—"
+                ts_str   = ""
+                if ts_r is not None:
+                    try:
+                        ts_str = pd.to_datetime(ts_r).strftime("%d/%m %H:%M")
+                    except Exception:
+                        pass
+                popup_html = (
+                    f"<div style='font-family:sans-serif;background:#1a1a2e;color:#e2e8f0;"
+                    f"border-radius:8px;padding:12px;min-width:190px;font-size:12px'>"
+                    f"<b style='font-size:14px;color:#f8fafc'>🌡️ {sname}</b><br>"
+                    f"<span style='color:#94a3b8'>📡 Estação: {sid}</span><br>"
+                    f"<span style='color:#94a3b8'>🏔️ Altitude: {alt_str}</span><br>"
+                    f"<hr style='border-color:#334155;margin:6px 0'>"
+                    f"🌧️ Chuva recente: <b style='color:#38bdf8'>{mm_str}</b><br>"
+                    f"🌡️ Temperatura: <b style='color:#fb923c'>{temp_str}</b><br>"
+                    f"💨 Vento: <b style='color:#a3e635'>{wind_str}</b><br>"
+                    f"<hr style='border-color:#334155;margin:6px 0'>"
+                    f"<span style='color:#64748b;font-size:11px'>📊 Fonte: INMET</span>"
+                    + (f"<br><span style='color:#64748b;font-size:11px'>🕐 {ts_str}</span>"
+                       if ts_str else "")
+                    + "</div>"
+                )
                 folium.CircleMarker(
                     location=[float(row[_ilat]), float(row[_ilon])],
                     radius=rad,
@@ -978,7 +1049,8 @@ def _build_map(stations_df: pd.DataFrame,
                     fill=True,
                     fill_color=color,
                     fill_opacity=0.85,
-                    tooltip=f"INMET {sid}: {mm:.1f} mm",
+                    popup=folium.Popup(popup_html, max_width=230),
+                    tooltip=f"🌡️ {sname}: {mm_str}",
                 ).add_to(inmet_layer)
     elif not stations_df.empty and "source" in stations_df.columns:
         _slat = next((c for c in stations_df.columns if c.lower() in ("lat", "latitude")), None)
@@ -1486,40 +1558,55 @@ def _solar_chart(df: pd.DataFrame, location: str) -> go.Figure:
     """
     fig = go.Figure()
     _DARK = "#0f172a"
+    # Detecção ampla: qualquer coluna com rad/solar/shortwave/ghi/irrad
     rad_col = next(
-        (c for c in ("shortwave_radiation", "solar_radiation", "radiation_w_m2")
-         if c in df.columns),
+        (c for c in df.columns
+         if any(x in c.lower() for x in
+                ("rad", "radiation", "solar", "shortwave", "ghi", "irrad"))),
         None,
     )
+    # Também tenta derivar do cloud_cover como proxy (0-100% → 800–0 W/m²)
+    has_cloud = "cloud_cover" in df.columns
 
     if rad_col:
         fig.add_trace(go.Scatter(
             x=df["valid_ts"],
             y=df[rad_col].clip(lower=0),
-            name="Radiação (W/m²)",
+            name=f"Radiação — {rad_col}",
             line={"color": "#fbbf24", "width": 2},
             fill="tozeroy",
             fillcolor="rgba(251,191,36,0.20)",
         ))
+    elif has_cloud and "valid_ts" in df.columns:
+        # Proxy: radiação estimada = 800 * (1 - cloud_cover/100)
+        rad_proxy = (1 - df["cloud_cover"].clip(0, 100) / 100) * 800
+        fig.add_trace(go.Scatter(
+            x=df["valid_ts"],
+            y=rad_proxy.clip(lower=0),
+            name="Radiação estimada (proxy cobertura nuvens)",
+            line={"color": "#fbbf24", "width": 2, "dash": "dot"},
+            fill="tozeroy",
+            fillcolor="rgba(251,191,36,0.12)",
+        ))
+        rad_col = "proxy"
 
-        # Bandas noturnas (20h–06h UTC-3 = 23h–09h UTC)
-        if "valid_ts" in df.columns and len(df) > 1:
-            ts_vals = pd.to_datetime(df["valid_ts"])
-            t_min, t_max = ts_vals.min(), ts_vals.max()
-            import datetime as _dt
-            cur = t_min.normalize()
-            while cur <= t_max:
-                night_start = cur + pd.Timedelta(hours=23)
-                night_end   = cur + pd.Timedelta(hours=33)  # +1 day 09h
-                if night_end > t_min and night_start < t_max:
-                    fig.add_vrect(
-                        x0=max(night_start, t_min),
-                        x1=min(night_end, t_max),
-                        fillcolor="rgba(15,23,42,0.55)",
-                        layer="below",
-                        line_width=0,
-                    )
-                cur += pd.Timedelta(days=1)
+    # Bandas noturnas (20h–06h UTC-3 = 23h–09h UTC)
+    if rad_col and "valid_ts" in df.columns and len(df) > 1:
+        ts_vals = pd.to_datetime(df["valid_ts"])
+        t_min, t_max = ts_vals.min(), ts_vals.max()
+        cur = t_min.normalize()
+        while cur <= t_max:
+            night_start = cur + pd.Timedelta(hours=23)
+            night_end   = cur + pd.Timedelta(hours=33)
+            if night_end > t_min and night_start < t_max:
+                fig.add_vrect(
+                    x0=max(night_start, t_min),
+                    x1=min(night_end, t_max),
+                    fillcolor="rgba(15,23,42,0.55)",
+                    layer="below",
+                    line_width=0,
+                )
+            cur += pd.Timedelta(days=1)
 
     fig.update_layout(
         paper_bgcolor=_DARK,
@@ -1533,10 +1620,14 @@ def _solar_chart(df: pd.DataFrame, location: str) -> go.Figure:
         yaxis={"title": {"text": "W/m²", "font": {"color": "#fbbf24"}},
                "gridcolor": "#334155", "tickfont": {"color": "#fbbf24"}},
     )
-    if not rad_col:
-        fig.add_annotation(text="Dados de radiação solar indisponíveis",
-                           xref="paper", yref="paper", x=0.5, y=0.5,
-                           showarrow=False, font={"color": "#64748b", "size": 14})
+    if not rad_col and not has_cloud:
+        fig.add_annotation(
+            text="☀️ Dados de radiação solar não disponíveis no modelo NWP atual<br>"
+                 "<span style='font-size:11px'>(Open-Meteo não exporta shortwave_radiation neste pipeline)</span>",
+            xref="paper", yref="paper", x=0.5, y=0.5,
+            showarrow=False, font={"color": "#64748b", "size": 13},
+            align="center",
+        )
     return fig
 
 
@@ -1673,7 +1764,18 @@ def _page_forecasts() -> None:
         st.plotly_chart(_wind_forecast_chart(df_fc, loc), use_container_width=True)
 
         st.markdown(f"### ☀️ Radiação Solar — {loc}")
-        st.plotly_chart(_solar_chart(df_fc, loc), use_container_width=True)
+        _has_rad = any(any(x in c.lower() for x in
+                           ("rad", "radiation", "solar", "shortwave", "ghi"))
+                       for c in df_fc.columns)
+        _has_cloud = "cloud_cover" in df_fc.columns
+        if not _has_rad and not _has_cloud:
+            st.info(
+                "☀️ Dados de radiação solar não disponíveis no modelo NWP atual. "
+                "O pipeline Open-Meteo não exporta `shortwave_radiation` — "
+                "adicione ao `noaa_collector.py` para ativar este gráfico."
+            )
+        else:
+            st.plotly_chart(_solar_chart(df_fc, loc), use_container_width=True)
 
     # ── Comparativo dos 10 pontos NWP ────────────────────────────────────
     if not summary_df.empty:
