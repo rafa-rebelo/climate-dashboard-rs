@@ -126,26 +126,91 @@ STATUS_EMOJI = {
 # ---------------------------------------------------------------------------
 DARK_CSS = """
 <style>
-/* Fundo principal dark */
+/* ── Base ── */
 .stApp { background-color: #0f172a; color: #e2e8f0; }
-section[data-testid="stSidebar"] { background-color: #1e293b; }
+section[data-testid="stSidebar"] { background-color: #0d1b2a; border-right: 1px solid #1e293b; }
 .stMetric { background-color: #1e293b; border-radius: 8px; padding: 8px; }
 div[data-testid="metric-container"] { background-color: #1e293b; border-radius: 8px; padding: 10px; }
 .status-card { background-color: #1e293b; border-radius: 12px; padding: 16px; margin: 8px 0; }
 .alert-badge { border-radius: 6px; padding: 2px 10px; font-weight: bold; font-size: 0.85em; }
-/* Plotly backgrounds */
 .js-plotly-plot .plotly .bg { fill: #0f172a !important; }
-/* Mobile */
-@media (max-width: 768px) {
-    .block-container { padding: 0.5rem; }
-    div[data-testid="metric-container"] { padding: 6px; }
+
+/* ── REDEMET — Painel operacional direito ── */
+.op-panel {
+    background: #0d1b2a;
+    border-left: 1px solid #1e293b;
+    padding: 0 0 0 12px;
+    min-height: 560px;
 }
-/* Windy period selector — pills horizontais */
+.op-section-title {
+    font-size: 0.72em; font-weight: 700; letter-spacing: 0.08em;
+    color: #475569; text-transform: uppercase; margin: 14px 0 6px 0;
+    border-bottom: 1px solid #1e293b; padding-bottom: 4px;
+}
+.rio-card {
+    background: #1e293b; border-radius: 8px; padding: 9px 12px;
+    margin: 5px 0; font-size: 0.82em; color: #cbd5e1;
+    border-left: 4px solid #22c55e;
+}
+.rio-card b { color: #f8fafc; }
+.rio-bar-wrap {
+    background: #334155; border-radius: 4px; height: 5px;
+    margin-top: 5px; overflow: hidden;
+}
+.rio-bar-fill {
+    height: 5px; border-radius: 4px; transition: width 0.4s;
+}
+.alert-card {
+    background: #1e293b; border-left: 4px solid #ef4444;
+    border-radius: 8px; padding: 9px 12px; margin: 5px 0;
+    font-size: 0.82em; color: #fca5a5;
+}
+.update-block {
+    background: #1e293b; border-radius: 8px; padding: 9px 12px;
+    font-size: 0.78em; color: #64748b; margin: 5px 0;
+    line-height: 1.8;
+}
+.station-card {
+    background: #1e293b; border-radius: 8px; padding: 10px 12px;
+    font-size: 0.81em; color: #cbd5e1; margin: 5px 0;
+    border: 1px solid #334155;
+}
+.station-card b { color: #38bdf8; font-size: 1.05em; }
+
+/* ── Tabs estilo REDEMET ── */
+.stTabs [data-baseweb="tab-list"] {
+    background: #0d1b2a !important;
+    border-bottom: 1px solid #1e293b;
+    gap: 2px;
+}
+.stTabs [data-baseweb="tab"] {
+    background: transparent !important;
+    color: #64748b !important;
+    border-radius: 4px 4px 0 0 !important;
+    font-size: 0.84em !important;
+    padding: 6px 14px !important;
+}
+.stTabs [aria-selected="true"] {
+    background: #1e293b !important;
+    color: #38bdf8 !important;
+    border-bottom: 2px solid #38bdf8 !important;
+}
+.stTabs [data-baseweb="tab-panel"] {
+    background: #0f172a;
+    padding-top: 12px;
+}
+
+/* ── Pills / radio ── */
 div[data-testid="stRadio"] div[role="radiogroup"] { gap: 6px; }
-/* Windy legend / card lateral */
 .windy-card {
     background: #1e293b; border: 1px solid #334155; border-radius: 10px;
     padding: 12px; margin: 6px 0; font-size: 0.83em; color: #cbd5e1;
+}
+
+/* ── Mobile ── */
+@media (max-width: 768px) {
+    .block-container { padding: 0.5rem; }
+    div[data-testid="metric-container"] { padding: 6px; }
 }
 </style>
 """
@@ -1204,66 +1269,73 @@ def _build_forecast_map(summary_df: pd.DataFrame,
 # Páginas
 # ---------------------------------------------------------------------------
 
+def _op_river_card(row: pd.Series) -> str:
+    """Gera HTML de card de rio estilo REDEMET para o painel operacional."""
+    status = str(row.get("status", "NORMAL"))
+    color  = STATUS_COLORS.get(status, "#22c55e")
+    level  = float(row.get("level_m") or 0)
+    pct    = float(row.get("pct_cota_atencao") or 0)
+    trend  = {"SUBINDO": "▲", "DESCENDO": "▼", "ESTAVEL": "→"}.get(
+        str(row.get("trend", "")), "→")
+    emoji  = STATUS_EMOJI.get(status, "⚪")
+    river  = str(row.get("river", "?"))
+    pct_w  = min(int(pct), 100)
+    return (
+        f"<div class='rio-card' style='border-left-color:{color}'>"
+        f"<div style='display:flex;justify-content:space-between;align-items:center'>"
+        f"<b>🌊 {river}</b>"
+        f"<span style='color:{color};font-size:0.9em'>{emoji} {status}</span>"
+        f"</div>"
+        f"<div style='color:#94a3b8;margin-top:3px'>"
+        f"<b style='color:#38bdf8'>{level:.2f} m</b> &nbsp;"
+        f"<span style='font-size:0.85em'>{pct:.0f}% cota &nbsp;{trend}</span>"
+        f"</div>"
+        f"<div class='rio-bar-wrap'>"
+        f"<div class='rio-bar-fill' style='width:{pct_w}%;background:{color}'></div>"
+        f"</div>"
+        f"</div>"
+    )
+
+
 def _page_overview(river_status_df: pd.DataFrame,
                    rain_df: pd.DataFrame,
                    stations_df: pd.DataFrame) -> None:
-    """Página principal: KPIs de rios + mapa estilo Windy + painel lateral com legenda."""
-    st.markdown("## 🗺️ Visão Geral")
-
-    # ── KPIs dos rios ──────────────────────────────────────────────────────
-    if river_status_df.empty:
-        st.info("Nenhum dado de rios disponível. Execute o coletor ANA primeiro.")
-    else:
-        cols = st.columns(len(river_status_df))
-        for i, (_, row) in enumerate(river_status_df.iterrows()):
-            status = row.get("status", "NORMAL")
-            emoji  = STATUS_EMOJI.get(status, "⚪")
-            level  = row.get("level_m") or 0.0
-            pct    = row.get("pct_cota_atencao") or 0.0
-            trend  = {"SUBINDO": "▲", "DESCENDO": "▼", "ESTAVEL": "→"}.get(
-                row.get("trend", ""), "→")
-            with cols[i]:
-                st.metric(
-                    label=f"{emoji} Rio {row['river']}",
-                    value=f"{level:.2f} m",
-                    delta=f"{pct:.0f}% cota {trend}",
-                    delta_color="inverse" if status in ("NORMAL",) else "off",
-                )
-
-    st.markdown("---")
-
-    # ── Seletor de período (pills horizontais) ─────────────────────────────
-    _period_opts = {
-        "1h": "rain_1h", "6h": "rain_6h", "24h": "rain_24h",
-        "48h": "rain_48h", "72h": "rain_72h",
-    }
-    periodo = st.radio(
-        "Acumulado exibido no mapa",
-        list(_period_opts.keys()),
-        index=2,
-        horizontal=True,
-    )
-    period_col = _period_opts[periodo]
-
-    # ── Dados satélite / INMET (carregados em background) ─────────────────
-    gpm_df    = load_gpm_precip()
-    inmet_df  = load_inmet_latest()
-
-    # ── Toggles de camadas (sidebar) ──────────────────────────────────────
-    with st.sidebar:
-        st.markdown("#### 🗂️ Camadas do mapa")
-        show_heatmap  = st.checkbox("HeatMap GPM/CHIRPS",       value=True)
-        show_inmet_pt = st.checkbox("Pontos INMET (chuva)",     value=False)
-        show_rios     = st.checkbox("Status dos Rios",          value=True)
-        show_layers = {
-            "heatmap":   show_heatmap,
-            "inmet_pts": show_inmet_pt,
-            "rios":      show_rios,
+    """Página principal estilo REDEMET: mapa 70% + painel operacional 30%."""
+    # ── Barra de controles topo ────────────────────────────────────────────
+    ctrl_l, ctrl_m, ctrl_r = st.columns([3, 4, 3])
+    with ctrl_l:
+        st.markdown(
+            "<span style='font-size:1.1em;font-weight:700;color:#f8fafc'>"
+            "🗺️ Mapa Operacional RS</span>",
+            unsafe_allow_html=True,
+        )
+    with ctrl_m:
+        _period_opts = {
+            "1h": "rain_1h", "6h": "rain_6h", "24h": "rain_24h",
+            "48h": "rain_48h", "72h": "rain_72h",
         }
+        periodo = st.radio(
+            "Acumulado",
+            list(_period_opts.keys()),
+            index=2,
+            horizontal=True,
+            label_visibility="collapsed",
+        )
+        period_col = _period_opts[periodo]
+    with ctrl_r:
+        show_heatmap  = st.checkbox("🛰️ GPM/CHIRPS",  value=True)
+        show_inmet_pt = st.checkbox("📡 INMET pontos", value=False)
 
-    # ── Layout mapa (3/4) + painel lateral (1/4) ──────────────────────────
-    col_map, col_right = st.columns([3, 1])
+    show_layers = {"heatmap": show_heatmap, "inmet_pts": show_inmet_pt, "rios": True}
 
+    # ── Dados satélite / INMET ─────────────────────────────────────────────
+    gpm_df   = load_gpm_precip()
+    inmet_df = load_inmet_latest()
+
+    # ── Layout principal REDEMET: mapa (70%) | painel (30%) ───────────────
+    col_map, col_panel = st.columns([7, 3])
+
+    # ── Coluna mapa ────────────────────────────────────────────────────────
     with col_map:
         if _FOLIUM_OK:
             m = _build_map(
@@ -1274,136 +1346,220 @@ def _page_overview(river_status_df: pd.DataFrame,
                 show_layers=show_layers,
             )
             if m is not None:
-                st_folium(m, use_container_width=True, height=560, returned_objects=[])
+                st_folium(m, use_container_width=True, height=580, returned_objects=[])
+            else:
+                st.info("Mapa indisponível.")
         else:
             st.warning("Instale `streamlit-folium`: `pip install streamlit-folium`")
-        if not gpm_df.empty:
-            src_label = "CHIRPS/GPM"
-            st.caption(f"Precipitação satélite: {len(gpm_df):,} pontos RS ← {src_label}")
 
-    with col_right:
-        # Legenda de chuva
-        st.markdown(
-            "<div class='windy-card'><b style='color:#f8fafc'>Chuva acumulada</b></div>",
-            unsafe_allow_html=True,
-        )
+        # Legenda de escala de chuva (bottom bar)
         _scale = [
-            ("#64748b", "Sem dados"),
-            ("#93c5fd", "< 5 mm"),
-            ("#1d4ed8", "5 – 20 mm"),
-            ("#16a34a", "20 – 40 mm"),
-            ("#ca8a04", "40 – 60 mm"),
-            ("#dc2626", "> 60 mm"),
+            ("#64748b", "Sem dado"), ("#93c5fd", "< 5 mm"), ("#1d4ed8", "5–20 mm"),
+            ("#16a34a", "20–40 mm"), ("#ca8a04", "40–60 mm"), ("#dc2626", "> 60 mm"),
         ]
-        for color, label in _scale:
-            st.markdown(
-                f"<div style='display:flex;align-items:center;gap:8px;margin:3px 0'>"
-                f"<span style='width:13px;height:13px;border-radius:50%;"
-                f"background:{color};flex-shrink:0;display:inline-block'></span>"
-                f"<span style='font-size:0.82em;color:#cbd5e1'>{label}</span></div>",
-                unsafe_allow_html=True,
-            )
-
-        st.markdown("<br>", unsafe_allow_html=True)
-
-        # Legenda de status dos rios
+        dots = "".join(
+            f"<span style='display:inline-flex;align-items:center;gap:4px;"
+            f"margin-right:10px;font-size:0.78em;color:#94a3b8'>"
+            f"<span style='width:10px;height:10px;border-radius:50%;"
+            f"background:{c};flex-shrink:0'></span>{l}</span>"
+            for c, l in _scale
+        )
         st.markdown(
-            "<div class='windy-card'><b style='color:#f8fafc'>Status dos Rios</b></div>",
+            f"<div style='padding:4px 0;border-top:1px solid #1e293b;margin-top:4px'>"
+            f"<span style='font-size:0.72em;color:#475569;text-transform:uppercase;"
+            f"letter-spacing:0.06em;margin-right:8px'>CHUVA ACUM. {periodo.upper()}</span>"
+            f"{dots}</div>",
             unsafe_allow_html=True,
         )
-        for status, color in STATUS_COLORS.items():
-            emoji = STATUS_EMOJI.get(status, "⚪")
-            st.markdown(
-                f"<div style='display:flex;align-items:center;gap:8px;margin:3px 0'>"
-                f"<span style='width:13px;height:13px;border-radius:50%;"
-                f"background:{color};flex-shrink:0;display:inline-block'></span>"
-                f"<span style='font-size:0.82em;color:#cbd5e1'>{emoji} {status}</span></div>",
-                unsafe_allow_html=True,
+        if not gpm_df.empty:
+            st.caption(
+                f"🛰️ GPM/CHIRPS: {len(gpm_df):,} pontos RS  ·  "
+                f"max {gpm_df['precip_mm'].max():.1f} mm"
+                if "precip_mm" in gpm_df.columns else
+                f"🛰️ GPM/CHIRPS: {len(gpm_df):,} pontos RS"
             )
 
-        # Cards de rios monitorados
-        if not river_status_df.empty:
-            st.markdown("<br>", unsafe_allow_html=True)
+    # ── Coluna painel operacional ──────────────────────────────────────────
+    with col_panel:
+        st.markdown("<div class='op-panel'>", unsafe_allow_html=True)
+
+        # Bloco 1 — KPIs dos rios
+        st.markdown(
+            "<div class='op-section-title'>🌊 RIOS MONITORADOS</div>",
+            unsafe_allow_html=True,
+        )
+        if river_status_df.empty:
+            st.caption("Sem dados de rios.")
+        else:
+            for _, row in river_status_df.iterrows():
+                st.markdown(_op_river_card(row), unsafe_allow_html=True)
+
+        # Bloco 2 — Alertas ativos
+        st.markdown(
+            "<div class='op-section-title'>🚨 ALERTAS ATIVOS</div>",
+            unsafe_allow_html=True,
+        )
+        df_act = load_alerts(limit=5, active_only=True)
+        if df_act.empty:
             st.markdown(
-                "<div class='windy-card'><b style='color:#f8fafc'>Monitoramento</b></div>",
+                "<div style='font-size:0.82em;color:#22c55e;padding:6px 0'>"
+                "✅ Nenhum alerta ativo</div>",
                 unsafe_allow_html=True,
             )
-            for _, row in river_status_df.iterrows():
-                status = row.get("status", "NORMAL")
-                color  = STATUS_COLORS.get(status, "#22c55e")
-                level  = row.get("level_m") or 0.0
+        else:
+            for _, a in df_act.iterrows():
+                sev   = str(a.get("severity", ""))
+                atype = str(a.get("alert_type", ""))
+                loc   = str(a.get("location", ""))
+                st.markdown(
+                    f"<div class='alert-card'>🚨 <b>{sev}</b> — {atype}<br>"
+                    f"<span style='color:#94a3b8'>{loc}</span></div>",
+                    unsafe_allow_html=True,
+                )
+
+        # Bloco 3 — Informações de atualização
+        st.markdown(
+            "<div class='op-section-title'>📡 ATUALIZAÇÃO</div>",
+            unsafe_allow_html=True,
+        )
+        now_str = datetime.now(timezone.utc).strftime("%H:%M UTC")
+        next_min = 10 - (datetime.now().minute % 10)
+        n_rain   = len(rain_df) if not rain_df.empty else 0
+        n_inmet  = len(inmet_df) if not inmet_df.empty else 0
+        st.markdown(
+            f"<div class='update-block'>"
+            f"🕐 Última coleta: <b>{now_str}</b><br>"
+            f"🔄 Próxima: em <b>~{next_min} min</b><br>"
+            f"📊 Estações chuva: <b>{n_rain}</b><br>"
+            f"📡 Estações INMET: <b>{n_inmet}</b><br>"
+            f"📦 Fonte: <b>GitHub Actions</b>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+        # Bloco 4 — Top-5 acumulados
+        if not rain_df.empty:
+            st.markdown(
+                "<div class='op-section-title'>🌧️ MAIORES ACUMULADOS</div>",
+                unsafe_allow_html=True,
+            )
+            sort_col = period_col if period_col in rain_df.columns else "rain_24h"
+            _wanted  = ["station_name", "municipality", "rain_1h", "rain_6h", "rain_24h"]
+            _avail   = [c for c in _wanted if c in rain_df.columns]
+            top5 = rain_df.nlargest(5, sort_col)
+            for _, row in top5.iterrows():
+                sname = str(row.get("station_name", row.get("station_id", "?")))
+                mun   = str(row.get("municipality", ""))
+                val   = float(row.get(sort_col) or 0)
+                color = _rain_color_windy(val) if val > 0 else "#64748b"
                 st.markdown(
                     f"<div style='background:#1e293b;border-left:3px solid {color};"
-                    f"border-radius:6px;padding:6px 10px;margin:4px 0;font-size:0.82em'>"
-                    f"<b style='color:#f8fafc'>{row['river']}</b><br>"
-                    f"<span style='color:#94a3b8'>{level:.2f} m</span> &nbsp;"
-                    f"<span style='color:{color}'>{status}</span>"
+                    f"border-radius:6px;padding:5px 10px;margin:3px 0;font-size:0.79em'>"
+                    f"<b style='color:#f8fafc'>{sname[:22]}</b>"
+                    f"<span style='float:right;color:{color}'>"
+                    f"<b>{val:.1f} mm</b></span><br>"
+                    f"<span style='color:#64748b'>{mun}</span>"
                     f"</div>",
                     unsafe_allow_html=True,
                 )
 
-    # ── Tabela top-5 acumulados ────────────────────────────────────────────
-    if not rain_df.empty:
-        sort_col = period_col if period_col in rain_df.columns else "rain_24h"
-        st.markdown(f"### 🌧️ Maiores acumulados {periodo}")
-        _wanted = ["station_name", "municipality", "river",
-                   "rain_1h", "rain_6h", "rain_24h", "rain_72h"]
-        _avail  = [c for c in _wanted if c in rain_df.columns]
-        top5 = rain_df.nlargest(5, sort_col)[_avail].rename(columns={
-            "station_name": "Estação",
-            "municipality": "Município",
-            "river": "Rio",
-            "rain_1h": "1h (mm)",
-            "rain_6h": "6h (mm)",
-            "rain_24h": "24h (mm)",
-            "rain_72h": "72h (mm)",
-        })
-        st.dataframe(top5, use_container_width=True, hide_index=True)
+        st.markdown("</div>", unsafe_allow_html=True)
 
 
 def _page_rivers(river_status_df: pd.DataFrame) -> None:
-    """Página de rios: gauges + séries temporais."""
-    st.markdown("## 🌊 Monitoramento de Rios")
-
-    col_gauges = st.columns(4)
-    for i, (_, row) in enumerate(river_status_df.iterrows() if not river_status_df.empty
-                                   else iter([])):
-        with col_gauges[i % 4]:
-            fig = _river_gauge(
-                river=row.get("river", ""),
-                level_m=row.get("level_m") or 0.0,
-                status=row.get("status", "NORMAL"),
-                trend=row.get("trend", "ESTAVEL"),
-                pct=row.get("pct_cota_atencao") or 0.0,
-            )
-            st.plotly_chart(fig, use_container_width=True)
+    """Página de rios estilo REDEMET: gauges + painel lista + série histórica."""
+    st.markdown(
+        "<span style='font-size:1.1em;font-weight:700;color:#f8fafc'>"
+        "🌊 Monitoramento de Rios — RS</span>",
+        unsafe_allow_html=True,
+    )
 
     if river_status_df.empty:
-        st.info("Sem dados de rios.")
+        st.info("Sem dados de rios. Execute o coletor ANA primeiro.")
         return
 
-    st.markdown("---")
-    st.markdown("### 📈 Série histórica")
+    # ── Layout: gauges + painel lista ─────────────────────────────────────
+    col_main, col_side = st.columns([7, 3])
 
-    selected_river = st.selectbox(
-        "Selecione o rio",
-        options=river_status_df["river"].tolist() if not river_status_df.empty
-                else list(RIOS_COTAS.keys()),
-    )
-    hours_back = st.slider("Janela temporal (horas)", 12, 240, 72, step=12)
+    with col_main:
+        col_gauges = st.columns(min(4, len(river_status_df)))
+        for i, (_, row) in enumerate(river_status_df.iterrows()):
+            with col_gauges[i % len(col_gauges)]:
+                fig = _river_gauge(
+                    river=row.get("river", ""),
+                    level_m=row.get("level_m") or 0.0,
+                    status=row.get("status", "NORMAL"),
+                    trend=row.get("trend", "ESTAVEL"),
+                    pct=row.get("pct_cota_atencao") or 0.0,
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+    with col_side:
+        st.markdown(
+            "<div class='op-section-title'>📋 LISTA DE RIOS</div>",
+            unsafe_allow_html=True,
+        )
+        for _, row in river_status_df.iterrows():
+            status = str(row.get("status", "NORMAL"))
+            color  = STATUS_COLORS.get(status, "#22c55e")
+            level  = float(row.get("level_m") or 0)
+            pct    = float(row.get("pct_cota_atencao") or 0)
+            trend  = {"SUBINDO": "▲ subindo", "DESCENDO": "▼ descendo",
+                      "ESTAVEL": "→ estável"}.get(str(row.get("trend", "")), "→ estável")
+            river  = str(row.get("river", "?"))
+            cfg    = RIOS_COTAS.get(river, {})
+            cota   = float(cfg.get("atencao", 0))
+            pct_w  = min(int(pct), 100)
+            st.markdown(
+                f"<div class='rio-card' style='border-left-color:{color}'>"
+                f"<div style='display:flex;justify-content:space-between'>"
+                f"<b>🌊 Rio {river}</b>"
+                f"<span style='color:{color};font-size:0.85em'>{status}</span>"
+                f"</div>"
+                f"<div style='color:#94a3b8;font-size:0.85em;margin-top:2px'>"
+                f"Nível: <b style='color:#38bdf8'>{level:.2f} m</b> &nbsp;/"
+                f"&nbsp;Cota: {cota:.1f} m<br>"
+                f"<span style='font-size:0.82em'>{trend} &nbsp;·&nbsp; {pct:.0f}% da cota</span>"
+                f"</div>"
+                f"<div class='rio-bar-wrap'>"
+                f"<div class='rio-bar-fill' style='width:{pct_w}%;background:{color}'></div>"
+                f"</div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+
+    # ── Série histórica ────────────────────────────────────────────────────
+    st.markdown("<div style='border-top:1px solid #1e293b;margin:12px 0'></div>",
+                unsafe_allow_html=True)
+
+    ctl_l, ctl_r = st.columns([3, 2])
+    with ctl_l:
+        selected_river = st.selectbox(
+            "Rio para série histórica",
+            options=river_status_df["river"].tolist(),
+        )
+    with ctl_r:
+        hours_back = st.select_slider(
+            "Janela temporal",
+            options=[12, 24, 48, 72, 120, 168, 240],
+            value=72,
+            format_func=lambda h: f"{h}h" if h < 48 else f"{h//24}d",
+        )
 
     df_levels = load_river_levels(selected_river, hours=hours_back)
     if df_levels.empty:
-        st.info(f"Sem histórico de níveis para {selected_river}.")
+        st.info(f"Sem histórico de níveis para {selected_river} nas últimas {hours_back}h.")
     else:
         fig = _river_timeseries(df_levels, selected_river)
         st.plotly_chart(fig, use_container_width=True)
 
-        st.markdown("#### Dados brutos")
-        disp = df_levels[["ts", "station_id", "station_name",
-                           "level_m", "flow_cms"]].copy()
-        disp["ts"] = disp["ts"].dt.strftime("%Y-%m-%d %H:%M")
-        st.dataframe(disp, use_container_width=True, hide_index=True)
+        with st.expander("Dados brutos"):
+            _cols_disp = [c for c in ["ts", "station_id", "station_name", "level_m", "flow_cms"]
+                          if c in df_levels.columns]
+            disp = df_levels[_cols_disp].copy()
+            if "ts" in disp.columns:
+                disp["ts"] = disp["ts"].dt.strftime("%Y-%m-%d %H:%M")
+            st.dataframe(disp, use_container_width=True, hide_index=True)
 
 
 def _page_rain(rain_df: pd.DataFrame) -> None:
@@ -1693,117 +1849,149 @@ def _page_forecasts() -> None:
 
     st.markdown("---")
 
-    # ── Mapa Windy ────────────────────────────────────────────────────────
-    st.markdown("### 🗺️ Chuva prevista 24h — grade RS")
+    # ── Abas REDEMET-style ────────────────────────────────────────────────
+    tab1, tab2, tab3, tab4 = st.tabs(
+        ["📈 Meteograma", "💨 Vento", "☀️ Radiação", "📊 Comparativo"]
+    )
 
-    if _FOLIUM_OK:
-        fc_map = _build_forecast_map(summary_df, loc)
-        if fc_map is not None:
-            st_folium(fc_map, use_container_width=True, height=480, returned_objects=[])
+    with tab1:
+        # Mapa grade + meteograma + rosa + resumo por modelo
+        st.markdown("### 🗺️ Chuva prevista 24h — grade RS")
+        if _FOLIUM_OK:
+            fc_map = _build_forecast_map(summary_df, loc)
+            if fc_map is not None:
+                st_folium(fc_map, use_container_width=True, height=480, returned_objects=[])
+            else:
+                st.info("Mapa não disponível.")
         else:
-            st.info("Mapa não disponível.")
-    else:
-        st.warning("Instale `streamlit-folium`: `pip install streamlit-folium`")
-        if not summary_df.empty:
-            _cols_disp = [c for c in ["location_name", "rain_6h", "rain_24h",
-                                       "rain_48h", "temp_mean"] if c in summary_df.columns]
-            disp_sum = summary_df[_cols_disp].copy()
-            disp_sum.columns = ["Cidade", "6h (mm)", "24h (mm)", "48h (mm)", "Temp °C"][
-                :len(_cols_disp)]
-            st.dataframe(disp_sum, use_container_width=True, hide_index=True)
+            st.warning("Instale `streamlit-folium`: `pip install streamlit-folium`")
+            if not summary_df.empty:
+                _cols_disp = [c for c in ["location_name", "rain_6h", "rain_24h",
+                                           "rain_48h", "temp_mean"] if c in summary_df.columns]
+                disp_sum = summary_df[_cols_disp].copy()
+                disp_sum.columns = ["Cidade", "6h (mm)", "24h (mm)", "48h (mm)", "Temp °C"][
+                    :len(_cols_disp)]
+                st.dataframe(disp_sum, use_container_width=True, hide_index=True)
 
-    st.markdown("---")
+        if not df_fc.empty:
+            st.markdown(f"### 📈 Meteograma — {loc}")
+            st.plotly_chart(_forecast_chart(df_fc, loc), use_container_width=True)
 
-    if not df_fc.empty:
-        # ── Meteograma multi-eixo + Rosa dos ventos ───────────────────────
-        st.markdown(f"### 📈 Meteograma — {loc}")
-        fig_fc = _forecast_chart(df_fc, loc)
-        st.plotly_chart(fig_fc, use_container_width=True)
+            col_rose, col_info = st.columns([1, 2])
+            with col_rose:
+                st.plotly_chart(_wind_rose(df_fc, loc), use_container_width=True)
+            with col_info:
+                st.markdown("#### Resumo por modelo")
+                for model, grp in df_fc.groupby("model_source"):
+                    r_total  = grp["rain_mm"].clip(lower=0).sum() if "rain_mm"     in grp.columns else 0
+                    t_min    = grp["temperature"].min()            if "temperature" in grp.columns else None
+                    t_max    = grp["temperature"].max()            if "temperature" in grp.columns else None
+                    w_max    = grp["wind_speed"].max()             if "wind_speed"  in grp.columns else None
+                    temp_str = f"{t_min:.0f}–{t_max:.0f} °C" if t_min is not None else "N/D"
+                    wind_str = f"{w_max:.0f} km/h"            if w_max  is not None else "N/D"
+                    color    = {"openmeteo": "#38bdf8", "noaa": "#f59e0b",
+                                "ecmwf": "#a78bfa"}.get(model, "#94a3b8")
+                    st.markdown(
+                        f"<div style='background:#1e293b;border-left:3px solid {color};"
+                        f"border-radius:6px;padding:10px 14px;margin:6px 0;font-size:0.9em'>"
+                        f"<b style='color:{color}'>{model.upper()}</b><br>"
+                        f"<span style='color:#94a3b8'>Chuva total:</span> <b>{r_total:.1f} mm</b> &nbsp;"
+                        f"<span style='color:#94a3b8'>Temp:</span> <b>{temp_str}</b> &nbsp;"
+                        f"<span style='color:#94a3b8'>Vento max:</span> <b>{wind_str}</b>"
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
 
-        col_rose, col_info = st.columns([1, 2])
-        with col_rose:
-            fig_rose = _wind_rose(df_fc, loc)
-            st.plotly_chart(fig_rose, use_container_width=True)
-        with col_info:
-            st.markdown("#### Resumo por modelo")
-            for model, grp in df_fc.groupby("model_source"):
-                r_total = grp["rain_mm"].clip(lower=0).sum() if "rain_mm" in grp.columns else 0
-                t_min   = grp["temperature"].min() if "temperature" in grp.columns else None
-                t_max   = grp["temperature"].max() if "temperature" in grp.columns else None
-                w_max   = grp["wind_speed"].max()  if "wind_speed"  in grp.columns else None
-                temp_str = f"{t_min:.0f}–{t_max:.0f} °C" if t_min is not None else "N/D"
-                wind_str = f"{w_max:.0f} km/h"            if w_max  is not None else "N/D"
-                color = {"openmeteo": "#38bdf8", "noaa": "#f59e0b",
-                         "ecmwf": "#a78bfa"}.get(model, "#94a3b8")
-                st.markdown(
-                    f"<div style='background:#1e293b;border-left:3px solid {color};"
-                    f"border-radius:6px;padding:10px 14px;margin:6px 0;font-size:0.9em'>"
-                    f"<b style='color:{color}'>{model.upper()}</b><br>"
-                    f"<span style='color:#94a3b8'>Chuva total:</span> <b>{r_total:.1f} mm</b> &nbsp;"
-                    f"<span style='color:#94a3b8'>Temp:</span> <b>{temp_str}</b> &nbsp;"
-                    f"<span style='color:#94a3b8'>Vento max:</span> <b>{wind_str}</b>"
-                    f"</div>",
-                    unsafe_allow_html=True,
-                )
+            with st.expander("Ver dados tabulares"):
+                _fc_cols = [c for c in ["valid_ts", "rain_mm", "temperature",
+                                         "wind_speed", "cape_j_kg", "model_source"]
+                            if c in df_fc.columns]
+                disp = df_fc[_fc_cols].copy()
+                if "valid_ts" in disp.columns:
+                    disp["valid_ts"] = disp["valid_ts"].dt.strftime("%d/%m %H:%M")
+                _rename_fc = {"valid_ts": "Data/Hora", "rain_mm": "Chuva (mm)",
+                              "temperature": "Temp (°C)", "wind_speed": "Vento (km/h)",
+                              "cape_j_kg": "CAPE (J/kg)", "model_source": "Modelo"}
+                disp.columns = [_rename_fc.get(c, c) for c in disp.columns]
+                st.dataframe(disp, use_container_width=True, hide_index=True)
+        else:
+            st.info(f"Sem previsões para {loc}. Execute o coletor Open-Meteo/NOAA.")
 
-        with st.expander("Ver dados tabulares"):
-            _fc_cols = [c for c in ["valid_ts", "rain_mm", "temperature",
-                                     "wind_speed", "cape_j_kg", "model_source"]
-                        if c in df_fc.columns]
-            disp = df_fc[_fc_cols].copy()
-            if "valid_ts" in disp.columns:
-                disp["valid_ts"] = disp["valid_ts"].dt.strftime("%d/%m %H:%M")
-            _rename_fc = {"valid_ts": "Data/Hora", "rain_mm": "Chuva (mm)",
-                          "temperature": "Temp (°C)", "wind_speed": "Vento (km/h)",
-                          "cape_j_kg": "CAPE (J/kg)", "model_source": "Modelo"}
-            disp.columns = [_rename_fc.get(c, c) for c in disp.columns]
-            st.dataframe(disp, use_container_width=True, hide_index=True)
-
-        st.markdown("---")
+    with tab2:
         st.markdown(f"### 💨 Vento — {loc}")
-        st.plotly_chart(_wind_forecast_chart(df_fc, loc), use_container_width=True)
-
-        st.markdown(f"### ☀️ Radiação Solar — {loc}")
-        _has_rad = any(any(x in c.lower() for x in
-                           ("rad", "radiation", "solar", "shortwave", "ghi"))
-                       for c in df_fc.columns)
-        _has_cloud = "cloud_cover" in df_fc.columns
-        if not _has_rad and not _has_cloud:
-            st.info(
-                "☀️ Dados de radiação solar não disponíveis no modelo NWP atual. "
-                "O pipeline Open-Meteo não exporta `shortwave_radiation` — "
-                "adicione ao `noaa_collector.py` para ativar este gráfico."
-            )
+        if not df_fc.empty:
+            st.plotly_chart(_wind_forecast_chart(df_fc, loc), use_container_width=True)
         else:
-            st.plotly_chart(_solar_chart(df_fc, loc), use_container_width=True)
+            st.info(f"Sem dados de vento para {loc}.")
 
-    # ── Comparativo dos 10 pontos NWP ────────────────────────────────────
-    if not summary_df.empty:
-        st.markdown("---")
+    with tab3:
+        st.markdown(f"### ☀️ Radiação Solar — {loc}")
+        if not df_fc.empty:
+            _has_rad = any(
+                any(x in c.lower() for x in ("rad", "radiation", "solar", "shortwave", "ghi"))
+                for c in df_fc.columns
+            )
+            _has_cloud = "cloud_cover" in df_fc.columns
+            if not _has_rad and not _has_cloud:
+                st.info(
+                    "☀️ Dados de radiação solar não disponíveis no modelo NWP atual. "
+                    "O pipeline Open-Meteo não exporta `shortwave_radiation` — "
+                    "adicione ao `noaa_collector.py` para ativar este gráfico."
+                )
+            else:
+                st.plotly_chart(_solar_chart(df_fc, loc), use_container_width=True)
+        else:
+            st.info(f"Sem dados de radiação para {loc}.")
+
+    with tab4:
         st.markdown("### 📊 Comparativo — 10 pontos NWP")
-        fig_cmp = go.Figure()
-        periodos = [("rain_6h", "6h"), ("rain_24h", "24h"), ("rain_48h", "48h")]
-        colors   = ["#38bdf8", "#818cf8", "#f59e0b"]
-        for (col, label), color in zip(periodos, colors):
-            if col in summary_df.columns:
-                fig_cmp.add_trace(go.Bar(
-                    name=label,
+        if not summary_df.empty:
+            fig_cmp = go.Figure()
+            periodos = [("rain_6h", "6h"), ("rain_24h", "24h"), ("rain_48h", "48h")]
+            _bar_colors = ["#38bdf8", "#818cf8", "#f59e0b"]
+            for (col, label), color in zip(periodos, _bar_colors):
+                if col in summary_df.columns:
+                    fig_cmp.add_trace(go.Bar(
+                        name=label,
+                        x=summary_df["location_name"],
+                        y=summary_df[col].fillna(0).clip(lower=0),
+                        marker_color=color,
+                    ))
+            fig_cmp.update_layout(
+                barmode="group",
+                paper_bgcolor="#0f172a",
+                plot_bgcolor="#1e293b",
+                font={"color": "#e2e8f0"},
+                legend={"bgcolor": "#1e293b"},
+                height=360,
+                margin={"t": 20, "b": 60, "l": 50, "r": 20},
+                xaxis={"tickangle": -30, "gridcolor": "#334155"},
+                yaxis={"title": "mm", "gridcolor": "#334155"},
+            )
+            st.plotly_chart(fig_cmp, use_container_width=True)
+
+            # Comparativo de temperatura por ponto
+            if "temp_mean" in summary_df.columns:
+                fig_temp = go.Figure(go.Bar(
                     x=summary_df["location_name"],
-                    y=summary_df[col].fillna(0).clip(lower=0),
-                    marker_color=color,
+                    y=summary_df["temp_mean"].fillna(0),
+                    marker_color="#f97316",
+                    name="Temp média (°C)",
                 ))
-        fig_cmp.update_layout(
-            barmode="group",
-            paper_bgcolor="#0f172a",
-            plot_bgcolor="#1e293b",
-            font={"color": "#e2e8f0"},
-            legend={"bgcolor": "#1e293b"},
-            height=320,
-            margin={"t": 20, "b": 60, "l": 50, "r": 20},
-            xaxis={"tickangle": -30, "gridcolor": "#334155"},
-            yaxis={"title": "mm", "gridcolor": "#334155"},
-        )
-        st.plotly_chart(fig_cmp, use_container_width=True)
+                fig_temp.update_layout(
+                    paper_bgcolor="#0f172a",
+                    plot_bgcolor="#1e293b",
+                    font={"color": "#e2e8f0"},
+                    height=280,
+                    margin={"t": 30, "b": 60, "l": 50, "r": 20},
+                    title={"text": "Temperatura média prevista por ponto",
+                           "font": {"color": "#e2e8f0", "size": 14}},
+                    xaxis={"tickangle": -30, "gridcolor": "#334155"},
+                    yaxis={"title": "°C", "gridcolor": "#334155"},
+                )
+                st.plotly_chart(fig_temp, use_container_width=True)
+        else:
+            st.info("Dados de previsão comparativa não disponíveis.")
 
 
 def _page_alerts() -> None:
@@ -1936,7 +2124,7 @@ def main() -> None:
 
         page = st.radio(
             "Navegação",
-            ["🗺️ Visão Geral", "🌊 Rios", "🌧️ Chuva",
+            ["🗺️ Mapa Operacional", "🌊 Rios", "🌧️ Chuva",
              "🔮 Previsões", "🚨 Alertas", "⚙️ Sistema"],
             label_visibility="collapsed",
         )
