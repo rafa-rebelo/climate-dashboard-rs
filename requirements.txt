@@ -11,7 +11,7 @@ requests-cache>=1.3.2  # 1.2.0 incompatível com urllib3 2.x (usado por niquests
 httpx==0.27.0
 
 # ── Banco de dados ────────────────────────────────────────────────
-duckdb==0.10.1
+duckdb==1.5.3
 
 # ── Dados climáticos ─────────────────────────────────────────────
 openmeteo-requests>=1.0.0
