@@ -312,13 +312,13 @@ def _collect_gpm_earthaccess(days_back: int = 1) -> pd.DataFrame:
     end   = datetime.now(timezone.utc)
     start = end - timedelta(days=days_back)
 
+    # earthaccess aceita datas simples "YYYY-MM-DD" sem ambiguidade de timezone
+    start_str = start.strftime("%Y-%m-%d")
+    end_str   = end.strftime("%Y-%m-%d")
     try:
         results = earthaccess.search_data(
             short_name=_GPM_HALF_HOURLY,
-            temporal=(
-                start.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                end.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            ),
+            temporal=(start_str, end_str),
             bounding_box=(_RS_LON_MIN, _RS_LAT_MIN, _RS_LON_MAX, _RS_LAT_MAX),
             count=5,
         )
