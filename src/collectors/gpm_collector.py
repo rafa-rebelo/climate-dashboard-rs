@@ -242,8 +242,9 @@ def _process_gpm_hdf5(hdf5_bytes: bytes, timestamp: datetime) -> pd.DataFrame:
                 lats = grid[lat_key][:]
                 lons = grid[lon_key][:]
 
-                # precipitationCal: V06=(time,lat,lon), V07=(time,lon,lat)
-                precip_raw = grid["precipitationCal"][0, :, :]
+                # V06: precipitationCal  |  V07C: precipitation (campo renomeado)
+                precip_key = "precipitationCal" if "precipitationCal" in grid else "precipitation"
+                precip_raw = grid[precip_key][0, :, :]
                 # Se shape[0]==n_lons → orientação (lon,lat) → transpor para (lat,lon)
                 if precip_raw.shape[0] == len(lons) and precip_raw.shape[1] == len(lats):
                     precip_rate = precip_raw.T
@@ -264,7 +265,10 @@ def _process_gpm_hdf5(hdf5_bytes: bytes, timestamp: datetime) -> pd.DataFrame:
                 lon_key = "lon" if "lon" in grid_grp.variables else "longitude"
                 lats = grid_grp.variables[lat_key][:]
                 lons = grid_grp.variables[lon_key][:]
-                precip_raw = grid_grp.variables["precipitationCal"][0, :, :]
+                # V06: precipitationCal  |  V07C: precipitation
+                precip_key = ("precipitationCal" if "precipitationCal" in grid_grp.variables
+                              else "precipitation")
+                precip_raw = grid_grp.variables[precip_key][0, :, :]
                 if precip_raw.shape[0] == len(lons) and precip_raw.shape[1] == len(lats):
                     precip_rate = precip_raw.T
                 else:

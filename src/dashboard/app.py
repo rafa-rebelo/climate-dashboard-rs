@@ -806,6 +806,27 @@ def _wind_rose(df: pd.DataFrame, location: str) -> go.Figure:
     return fig
 
 
+def _safe_float(v) -> float:
+    """Converte para float; retorna 0.0 se None ou NaN (NaN é truthy, não pode usar `or 0`)."""
+    try:
+        return 0.0 if pd.isna(v) else float(v)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _fmt_rain(row: "pd.Series", col: str) -> str:
+    """Formata mm para popup — retorna '—' se dado original era NaN."""
+    raw = row.get(col)
+    if raw is None:
+        return "—"
+    try:
+        if pd.isna(raw):
+            return "—"
+    except (TypeError, ValueError):
+        pass
+    return f"{float(raw):.1f} mm"
+
+
 def _inmet_rain_color(mm: float) -> str:
     """
     Escala de cores Windy para chuva de estações pontuais.
@@ -935,25 +956,26 @@ def _build_map(stations_df: pd.DataFrame,
         name=f"Estações chuva {period_label}", show=layers.get("inmet", True)
     )
     if not rain_df.empty and period in rain_df.columns:
-        ts_col = next((c for c in ("max_ts", "ts", "updated_at") if c in rain_df.columns), None)
+        # "date" = data real dos dados; "updated_at" = quando o cálculo rodou (enganoso)
+        ts_col = next((c for c in ("max_ts", "ts", "date", "updated_at") if c in rain_df.columns), None)
         for _, row in rain_df.iterrows():
             if pd.isna(row.get("lat")) or pd.isna(row.get("lon")):
                 continue
-            val    = float(row.get(period) or 0)
+            val    = _safe_float(row.get(period))   # NaN→0 (NaN é truthy, `or 0` não funciona)
             color  = _rain_color_windy(val) if val > 0 else "#64748b"
             radius = max(8, min(45, 8 + val * 0.55))
             name   = (row.get("station_name") or row.get("name")
                       or str(row.get("station_id", "—")))
             mun    = str(row.get("municipality") or "")
             rv     = str(row.get("river") or "")
-            r1h    = float(row.get("rain_1h") or 0)
-            r6h    = float(row.get("rain_6h") or 0)
-            r24h   = float(row.get("rain_24h") or 0)
-            r72h   = float(row.get("rain_72h") or 0)
+            r1h_s  = _fmt_rain(row, "rain_1h")
+            r6h_s  = _fmt_rain(row, "rain_6h")
+            r24h_s = _fmt_rain(row, "rain_24h")
+            r72h_s = _fmt_rain(row, "rain_72h")
             ts_str = ""
             if ts_col and not pd.isna(row.get(ts_col)):
                 try:
-                    ts_str = pd.to_datetime(row[ts_col]).strftime("%d/%m %H:%M")
+                    ts_str = pd.to_datetime(row[ts_col]).strftime("%d/%m/%Y")
                 except Exception:
                     pass
 
@@ -969,18 +991,19 @@ def _build_map(stations_df: pd.DataFrame,
                 f"<hr style='border-color:#334155;margin:6px 0'>"
                 f"<table style='width:100%;border-collapse:collapse'>"
                 f"<tr><td style='color:#94a3b8'>1h</td>"
-                f"    <td style='text-align:right;color:#38bdf8'><b>{r1h:.1f} mm</b></td></tr>"
+                f"    <td style='text-align:right;color:#38bdf8'><b>{r1h_s}</b></td></tr>"
                 f"<tr><td style='color:#94a3b8'>6h</td>"
-                f"    <td style='text-align:right;color:#38bdf8'><b>{r6h:.1f} mm</b></td></tr>"
+                f"    <td style='text-align:right;color:#38bdf8'><b>{r6h_s}</b></td></tr>"
                 f"<tr><td style='color:#94a3b8'>24h</td>"
-                f"    <td style='text-align:right;color:#38bdf8'><b>{r24h:.1f} mm</b></td></tr>"
+                f"    <td style='text-align:right;color:#38bdf8'><b>{r24h_s}</b></td></tr>"
                 f"<tr><td style='color:#94a3b8'>72h</td>"
-                f"    <td style='text-align:right;color:#38bdf8'><b>{r72h:.1f} mm</b></td></tr>"
+                f"    <td style='text-align:right;color:#38bdf8'><b>{r72h_s}</b></td></tr>"
                 f"</table>"
                 + (f"<hr style='border-color:#334155;margin:6px 0'>"
-                   f"<small style='color:#64748b'>{ts_str}</small>" if ts_str else "")
+                   f"<small style='color:#64748b'>Dados: {ts_str}</small>" if ts_str else "")
                 + "</div>"
             )
+            val_str = f"{val:.1f} mm" if val > 0 else "Sem chuva"
             folium.CircleMarker(
                 location=[row["lat"], row["lon"]],
                 radius=radius,
@@ -990,7 +1013,7 @@ def _build_map(stations_df: pd.DataFrame,
                 fill_color=color,
                 fill_opacity=0.72,
                 popup=folium.Popup(popup_html, max_width=220),
-                tooltip=f"{name}: {val:.1f} mm/{period_label}",
+                tooltip=f"{name}: {val_str}/{period_label}",
             ).add_to(rain_layer)
     rain_layer.add_to(m)
 
@@ -1324,9 +1347,9 @@ def _page_overview(river_status_df: pd.DataFrame,
         period_col = _period_opts[periodo]
     with ctrl_r:
         show_heatmap  = st.checkbox("🛰️ GPM/CHIRPS",  value=True)
-        show_inmet_pt = st.checkbox("📡 INMET pontos", value=False)
 
-    show_layers = {"heatmap": show_heatmap, "inmet_pts": show_inmet_pt, "rios": True}
+    # inmet_pts controlado pelo LayerControl do mapa Folium (não duplicar aqui)
+    show_layers = {"heatmap": show_heatmap, "inmet_pts": False, "rios": True}
 
     # ── Dados satélite / INMET ─────────────────────────────────────────────
     gpm_df   = load_gpm_precip()
