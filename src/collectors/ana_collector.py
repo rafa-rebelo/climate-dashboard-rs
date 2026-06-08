@@ -67,7 +67,10 @@ from tenacity import (
 
 load_dotenv()
 
-BASE_URL = "https://www.ana.gov.br/hidrowebservice"
+# CF_WORKER_URL → Cloudflare Worker proxy (resolve bloqueio de IP da ANA em GH Actions).
+# Sem a variável: usa ANA diretamente (funciona localmente, bloqueado no runner).
+_CF_PROXY = os.getenv("CF_WORKER_URL", "").rstrip("/")
+BASE_URL = f"{_CF_PROXY}/hidrowebservice" if _CF_PROXY else "https://www.ana.gov.br/hidrowebservice"
 
 # ── Estações dos rios críticos do RS ─────────────────────────────────────────
 RIOS_RS: dict[str, dict] = {
