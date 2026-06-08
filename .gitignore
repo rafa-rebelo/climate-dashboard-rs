@@ -19,6 +19,10 @@ data/raw/radar_images/
 data/raw/*.nc
 data/raw/*.hdf5
 
+# Parquets gerados — vivem no climate-data-rs, não no código
+data/forecasts/*.parquet
+data/processed/*.parquet
+
 # Modelos treinados grandes (usar Git LFS)
 # models_saved/*.pt   ← gerenciado pelo Git LFS
 
