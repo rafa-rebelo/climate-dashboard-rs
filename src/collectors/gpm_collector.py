@@ -233,10 +233,22 @@ def _process_gpm_hdf5(hdf5_bytes: bytes, timestamp: datetime) -> pd.DataFrame:
     try:
         if _H5PY_OK:
             with h5py.File(io.BytesIO(hdf5_bytes), "r") as f:
-                lats = f["Grid"]["lat"][:]          # (1800,) ou shape var
-                lons = f["Grid"]["lon"][:]          # (3600,)
-                # precipitationCal shape: (time, lat, lon)
-                precip_rate = f["Grid"]["precipitationCal"][0, :, :]  # mm/hr
+                grid = f["Grid"]
+                logger.debug(f"GPM Grid keys: {list(grid.keys())}")
+
+                # V06: lat/lon  |  V07: latitude/longitude
+                lat_key = "lat"       if "lat"       in grid else "latitude"
+                lon_key = "lon"       if "lon"       in grid else "longitude"
+                lats = grid[lat_key][:]
+                lons = grid[lon_key][:]
+
+                # precipitationCal: V06=(time,lat,lon), V07=(time,lon,lat)
+                precip_raw = grid["precipitationCal"][0, :, :]
+                # Se shape[0]==n_lons → orientação (lon,lat) → transpor para (lat,lon)
+                if precip_raw.shape[0] == len(lons) and precip_raw.shape[1] == len(lats):
+                    precip_rate = precip_raw.T
+                else:
+                    precip_rate = precip_raw
         else:
             # netCDF4 lê HDF5 via driver
             import tempfile, os as _os
@@ -245,9 +257,15 @@ def _process_gpm_hdf5(hdf5_bytes: bytes, timestamp: datetime) -> pd.DataFrame:
                 tmp_path = tmp.name
             try:
                 ds = netCDF4.Dataset(tmp_path, "r")
-                lats = ds.variables["lat"][:]
-                lons = ds.variables["lon"][:]
-                precip_rate = ds.variables["precipitationCal"][0, :, :]
+                lat_key = "lat" if "lat" in ds.variables else "latitude"
+                lon_key = "lon" if "lon" in ds.variables else "longitude"
+                lats = ds.variables[lat_key][:]
+                lons = ds.variables[lon_key][:]
+                precip_raw = ds.variables["precipitationCal"][0, :, :]
+                if precip_raw.shape[0] == len(lons) and precip_raw.shape[1] == len(lats):
+                    precip_rate = precip_raw.T
+                else:
+                    precip_rate = precip_raw
                 ds.close()
             finally:
                 _os.unlink(tmp_path)
