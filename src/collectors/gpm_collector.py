@@ -59,6 +59,14 @@ try:
 except ImportError:
     _NC4_OK = False
 
+# earthaccess — lida corretamente com o redirect URS da NASA (substitui CMR+niquests)
+try:
+    import earthaccess
+    _EARTHACCESS_OK = True
+except ImportError:
+    _EARTHACCESS_OK = False
+    logger.warning("earthaccess não disponível — usando CMR+niquests (pode falhar com HTTP 401)")
+
 # ---------------------------------------------------------------------------
 # Caminhos e constantes
 # ---------------------------------------------------------------------------
@@ -275,9 +283,83 @@ def _process_gpm_hdf5(hdf5_bytes: bytes, timestamp: datetime) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+def _collect_gpm_earthaccess(days_back: int = 1) -> pd.DataFrame:
+    """
+    Pipeline GPM IMERG via earthaccess: lida corretamente com redirect URS NASA.
+
+    earthaccess gerencia automaticamente o fluxo OAuth/redirect do Earthdata URS,
+    resolvendo o HTTP 401 que ocorre quando niquests não reenvia credenciais
+    nos redirecionamentos intermediários.
+
+    Args:
+        days_back: Janela de busca em dias.
+
+    Returns:
+        DataFrame de precipitação RS ou vazio se falhou.
+    """
+    import re
+    import tempfile
+
+    try:
+        auth = earthaccess.login(strategy="netrc")
+        if not auth.authenticated:
+            logger.warning("GPM earthaccess: autenticação falhou — verifique ~/.netrc")
+            return pd.DataFrame()
+    except Exception as exc:
+        logger.warning(f"GPM earthaccess login falhou: {exc}")
+        return pd.DataFrame()
+
+    end   = datetime.now(timezone.utc)
+    start = end - timedelta(days=days_back)
+
+    try:
+        results = earthaccess.search_data(
+            short_name=_GPM_HALF_HOURLY,
+            temporal=(
+                start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                end.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            ),
+            bounding_box=(_RS_LON_MIN, _RS_LAT_MIN, _RS_LON_MAX, _RS_LAT_MAX),
+            count=5,
+        )
+    except Exception as exc:
+        logger.warning(f"GPM earthaccess search falhou: {exc}")
+        return pd.DataFrame()
+
+    if not results:
+        logger.warning("GPM IMERG: nenhum granule encontrado via earthaccess")
+        return pd.DataFrame()
+
+    logger.info(f"GPM IMERG: {len(results)} granules — baixando mais recente via earthaccess...")
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        try:
+            files = earthaccess.download(results[:1], local_path=tmp_dir)
+        except Exception as exc:
+            logger.warning(f"GPM earthaccess download falhou: {exc}")
+            return pd.DataFrame()
+
+        if not files:
+            logger.warning("GPM earthaccess: nenhum arquivo retornado")
+            return pd.DataFrame()
+
+        hdf5_path  = Path(files[0])
+        hdf5_bytes = hdf5_path.read_bytes()
+        logger.debug(f"GPM earthaccess: {len(hdf5_bytes) / 1024:.0f} KB baixados — {hdf5_path.name}")
+
+        m = re.search(r"(\d{8})-S(\d{6})", hdf5_path.name)
+        try:
+            ts_str    = m.group(1) + m.group(2) if m else ""
+            timestamp = datetime.strptime(ts_str, "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
+        except (ValueError, AttributeError):
+            timestamp = datetime.now(timezone.utc)
+
+    return _process_gpm_hdf5(hdf5_bytes, timestamp)
+
+
 def collect_gpm_imerg(days_back: int = 1) -> pd.DataFrame:
     """
-    Pipeline GPM IMERG: CMR search → download HDF5 → extrai RS.
+    Pipeline GPM IMERG: earthaccess (primário) → CMR+niquests (legado) → vazio.
 
     Args:
         days_back: Janela de busca em dias.
@@ -285,10 +367,15 @@ def collect_gpm_imerg(days_back: int = 1) -> pd.DataFrame:
     Returns:
         DataFrame de precipitação RS ou vazio se falhou / sem auth.
     """
-    if not _GPM_AUTH:
+    if not _NASA_USER or not _NASA_PASS:
         logger.info("GPM IMERG: NASA_USER/NASA_PASS não configurados — pulando")
         return pd.DataFrame()
 
+    # Caminho primário: earthaccess resolve o redirect URS corretamente
+    if _EARTHACCESS_OK:
+        return _collect_gpm_earthaccess(days_back=days_back)
+
+    # Legado: CMR manual + niquests (pode falhar com HTTP 401 em redirect URS)
     try:
         entries = _cmr_search_gpm(days_back=days_back)
     except RetryError as exc:
@@ -299,8 +386,8 @@ def collect_gpm_imerg(days_back: int = 1) -> pd.DataFrame:
         logger.warning("GPM IMERG: nenhum granule encontrado no CMR")
         return pd.DataFrame()
 
-    entry   = entries[0]
-    dl_url  = _gpm_extract_download_url(entry)
+    entry  = entries[0]
+    dl_url = _gpm_extract_download_url(entry)
     if not dl_url:
         logger.warning(f"GPM IMERG: URL de download não encontrada em {entry.get('title','?')}")
         return pd.DataFrame()
@@ -312,18 +399,12 @@ def collect_gpm_imerg(days_back: int = 1) -> pd.DataFrame:
         logger.warning(f"GPM IMERG: download falhou: {exc}")
         return pd.DataFrame()
 
-    # Extrai timestamp do título (ex: 3B-HHR-E...20260606-S153000...)
+    import re
     title = entry.get("title", "")
     try:
-        import re
         m = re.search(r"(\d{8})-S(\d{6})", title)
-        if m:
-            ts_str = m.group(1) + m.group(2)
-            timestamp = datetime.strptime(ts_str, "%Y%m%d%H%M%S").replace(
-                tzinfo=timezone.utc
-            )
-        else:
-            timestamp = datetime.now(timezone.utc)
+        ts_str    = m.group(1) + m.group(2) if m else ""
+        timestamp = datetime.strptime(ts_str, "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
     except (ValueError, AttributeError):
         timestamp = datetime.now(timezone.utc)
 
