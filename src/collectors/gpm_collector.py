@@ -216,6 +216,12 @@ def _process_gpm_hdf5(hdf5_bytes: bytes, timestamp: datetime) -> pd.DataFrame:
         logger.error("Nem h5py nem netCDF4 disponíveis para ler HDF5 do GPM")
         return pd.DataFrame()
 
+    # Valida magic bytes HDF5 (\x89HDF) — resposta HTML (401/403) causaria KeyError
+    if len(hdf5_bytes) < 4 or hdf5_bytes[:4] != b"\x89HDF":
+        preview = hdf5_bytes[:120].decode("utf-8", errors="replace").strip()
+        logger.warning(f"GPM: arquivo não é HDF5 válido (conteúdo: {preview!r}) — fallback para CHIRPS")
+        return pd.DataFrame()
+
     try:
         if _H5PY_OK:
             with h5py.File(io.BytesIO(hdf5_bytes), "r") as f:

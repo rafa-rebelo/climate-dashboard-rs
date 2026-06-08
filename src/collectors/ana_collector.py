@@ -248,7 +248,10 @@ class ANAClient:
         self.session = niquests.Session()
         # Content-Type e Accept específicos por endpoint — não no nível da sessão
         # (ANA retorna XML em vários endpoints; Accept: application/json causa 406)
-        self.session.headers.update({"Accept": "*/*"})
+        self.session.headers.update({
+            "Accept": "*/*",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        })
         if token:
             self.session.headers["Authorization"] = f"Bearer {token}"
             logger.info("Token ANA carregado diretamente.")

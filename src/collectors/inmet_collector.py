@@ -647,8 +647,12 @@ def _download_zip_inmet(year: int) -> bytes:
     url = f"{_HIST_BASE}/{year}.zip"
     logger.info(f"INMET histórico: baixando {url} ...")
 
+    _headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "application/zip, application/octet-stream, */*",
+    }
     try:
-        resp = niquests.get(url, timeout=120, stream=True)
+        resp = niquests.get(url, timeout=120, stream=True, headers=_headers)
     except Exception as exc:
         raise RuntimeError(f"Falha ao baixar ZIP INMET {year}: {exc}") from exc
 
