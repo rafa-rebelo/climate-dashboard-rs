@@ -257,11 +257,14 @@ def _process_gpm_hdf5(hdf5_bytes: bytes, timestamp: datetime) -> pd.DataFrame:
                 tmp_path = tmp.name
             try:
                 ds = netCDF4.Dataset(tmp_path, "r")
-                lat_key = "lat" if "lat" in ds.variables else "latitude"
-                lon_key = "lon" if "lon" in ds.variables else "longitude"
-                lats = ds.variables[lat_key][:]
-                lons = ds.variables[lon_key][:]
-                precip_raw = ds.variables["precipitationCal"][0, :, :]
+                # GPM HDF5: lat/lon ficam em ds.groups["Grid"], não na raiz
+                grid_grp = ds.groups.get("Grid", ds)
+                logger.debug(f"GPM netCDF4 Grid variables: {list(grid_grp.variables.keys())}")
+                lat_key = "lat" if "lat" in grid_grp.variables else "latitude"
+                lon_key = "lon" if "lon" in grid_grp.variables else "longitude"
+                lats = grid_grp.variables[lat_key][:]
+                lons = grid_grp.variables[lon_key][:]
+                precip_raw = grid_grp.variables["precipitationCal"][0, :, :]
                 if precip_raw.shape[0] == len(lons) and precip_raw.shape[1] == len(lats):
                     precip_rate = precip_raw.T
                 else:
