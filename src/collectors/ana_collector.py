@@ -49,10 +49,16 @@ NOTA DE AMBIENTE:
 from __future__ import annotations
 
 import os
+import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
+
+# Garante que src/ está no sys.path quando executado como script standalone
+_SRC_DIR = Path(__file__).resolve().parent.parent  # src/collectors/.. = src/
+if str(_SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(_SRC_DIR))
 
 import niquests
 import pandas as pd
@@ -66,6 +72,13 @@ from tenacity import (
 )
 
 load_dotenv()
+
+# Importação lazy para evitar circular import e manter compatibilidade como script standalone
+try:
+    from database.hybrid_writer import HybridWriter as _HybridWriter
+    _HW_OK = True
+except ImportError:  # execução fora do src/ sem PYTHONPATH correto
+    _HW_OK = False
 
 # CF_WORKER_URL → Cloudflare Worker proxy (resolve bloqueio de IP da ANA em GH Actions).
 # Sem a variável: usa ANA diretamente (funciona localmente, bloqueado no runner).
@@ -896,6 +909,7 @@ def coletar_rios_rs(
                             "rio_nome":          rio,
                             "station_code":      cod,
                             "current_level_m":   round(nivel, 3),
+                            "cota_atencao_m":    cfg["cota_atencao_m"],
                             "cota_alerta_m":     cfg["cota_alerta_m"],
                             "cota_emergencia_m": cfg["cota_emergencia_m"],
                             "pct_cota_alerta":   round(pct, 1),
@@ -914,16 +928,33 @@ def coletar_rios_rs(
     df_serie  = pd.concat(all_series,  ignore_index=True) if all_series  else pd.DataFrame()
     df_status = pd.DataFrame(status_list)
 
-    Path("data/raw").mkdir(parents=True, exist_ok=True)
-    Path("data/processed").mkdir(parents=True, exist_ok=True)
-
-    if not df_serie.empty:
-        df_serie.to_parquet("data/raw/river_levels.parquet", index=False)
-        logger.success(f"river_levels.parquet — {len(df_serie)} registros.")
-
-    if not df_status.empty:
-        df_status.to_parquet("data/processed/river_status.parquet", index=False)
-        _imprimir_resumo(df_status)
+    if _HW_OK:
+        writer = _HybridWriter()
+        if not df_serie.empty:
+            res = writer.write_river_levels(df_serie)
+            logger.success(
+                f"river_levels — {res.pg_rows:,} registros PG "
+                f"| R2: {'ok' if res.r2_ok else 'skip'}"
+            )
+        if not df_status.empty:
+            res_st = writer.write_river_status(df_status)
+            logger.success(
+                f"river_status — {res_st.pg_rows:,} registros PG "
+                f"| R2: {'ok' if res_st.r2_ok else 'skip'}"
+            )
+            if not res_st.pg_ok and res_st.pg_error:
+                logger.error(f"river_status PG falhou: {res_st.pg_error}")
+            _imprimir_resumo(df_status)
+    else:
+        # Fallback direto (sem HybridWriter) — mantém compatibilidade
+        Path("data/raw").mkdir(parents=True, exist_ok=True)
+        Path("data/processed").mkdir(parents=True, exist_ok=True)
+        if not df_serie.empty:
+            df_serie.to_parquet("data/raw/river_levels.parquet", index=False)
+            logger.success(f"river_levels.parquet — {len(df_serie)} registros.")
+        if not df_status.empty:
+            df_status.to_parquet("data/processed/river_status.parquet", index=False)
+            _imprimir_resumo(df_status)
 
     return df_serie, df_status
 
@@ -972,8 +1003,15 @@ def coletar_qualidade_agua_rs(
         return pd.DataFrame()
 
     df_qa = pd.concat(all_qa, ignore_index=True)
-    df_qa.to_parquet("data/raw/water_quality.parquet", index=False)
-    logger.success(f"water_quality.parquet — {len(df_qa)} registros.")
+    if _HW_OK:
+        res = _HybridWriter().write_water_quality(df_qa)
+        logger.success(
+            f"water_quality — {res.pg_rows:,} registros PG "
+            f"| R2: {'ok' if res.r2_ok else 'skip'}"
+        )
+    else:
+        df_qa.to_parquet("data/raw/water_quality.parquet", index=False)
+        logger.success(f"water_quality.parquet — {len(df_qa)} registros.")
     return df_qa
 
 

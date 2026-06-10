@@ -28,7 +28,18 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-import duckdb
+# Garante que src/ está no sys.path quando executado como script standalone
+_SRC_DIR = Path(__file__).resolve().parent.parent  # src/collectors/.. = src/
+if str(_SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(_SRC_DIR))
+
+try:
+    import duckdb
+    _DUCKDB_AVAIL = True
+except ImportError:
+    duckdb = None  # type: ignore[assignment]
+    _DUCKDB_AVAIL = False
+
 import pandas as pd
 from loguru import logger
 from tenacity import (
@@ -43,6 +54,12 @@ try:
     import niquests as niquests  # type: ignore
 except ImportError:
     import requests as niquests  # type: ignore
+
+try:
+    from database.hybrid_writer import HybridWriter as _HybridWriter
+    _HW_OK = True
+except ImportError:
+    _HW_OK = False
 
 # ---------------------------------------------------------------------------
 # Constantes
@@ -466,6 +483,10 @@ def upsert_inmet_duckdb(
     Raises:
         duckdb.Error: Se alguma operação DuckDB falhar de modo irrecuperável.
     """
+    if not _DUCKDB_AVAIL or duckdb is None:
+        logger.warning("  DuckDB não disponível — skip upsert_inmet_duckdb.")
+        return {"stations": 0, "rain_readings": 0}
+
     try:
         conn = duckdb.connect(str(_DB_PATH))
     except duckdb.IOException as exc:
@@ -603,7 +624,17 @@ def collect_inmet(
         logger.error(f"INMET: falha irrecuperável — {exc}")
         raise
 
-    counts = upsert_inmet_duckdb(inventario, leituras)
+    if _HW_OK:
+        from database.hybrid_writer import HybridWriter as _HW
+        writer = _HW()
+        res_st = writer.write_stations(inventario, path=_INV_PARQUET)
+        res_rd = writer.write_rain_readings(leituras, path=_OUT_PARQUET) if not leituras.empty else None
+        counts = {
+            "stations":     res_st.pg_rows,
+            "rain_readings": res_rd.pg_rows if res_rd else 0,
+        }
+    else:
+        counts = upsert_inmet_duckdb(inventario, leituras)
 
     duration = (datetime.now(tz=timezone.utc) - t_start).total_seconds()
     logger.info("=" * 60)
@@ -916,27 +947,39 @@ def collect_historico_rs(
             f"| {df_leituras['station_id'].nunique() if not df_leituras.empty else 0} estações"
         )
 
-    # Salva parquets
-    _PARQUET_DIR.mkdir(parents=True, exist_ok=True)
-    _RAW_DIR.mkdir(parents=True, exist_ok=True)
-
-    if not df_leituras.empty:
-        df_leituras.to_parquet(_HIST_PARQUET, index=False)
-        logger.info(f"  Salvo: {_HIST_PARQUET}")
-
-    if not df_stations.empty:
-        df_stations.to_parquet(_INV_PARQUET, index=False)
-        df_stations.to_parquet(_RAW_DIR / "inmet_stations_rs.parquet", index=False)
-        logger.info(f"  Salvo: {_INV_PARQUET} ({len(df_stations)} estações RS)")
-
-    # Upsert DuckDB
-    counts = upsert_inmet_duckdb(df_stations, df_leituras)
+    # Persistência híbrida: Parquet (CDN) + DuckDB (analytics)
+    if _HW_OK:
+        writer = _HybridWriter()
+        # Stations primeiro (rain_readings tem FK → stations)
+        res_st = writer.write_stations(
+            df_stations,
+            path=_INV_PARQUET,
+            extra_paths=[_RAW_DIR / "inmet_stations_rs.parquet"],
+        )
+        res_rd = writer.write_rain_readings(df_leituras, path=_HIST_PARQUET)
+        counts = {
+            "stations":     res_st.pg_rows,
+            "rain_readings": res_rd.pg_rows,
+        }
+    else:
+        # Fallback sem HybridWriter
+        _PARQUET_DIR.mkdir(parents=True, exist_ok=True)
+        _RAW_DIR.mkdir(parents=True, exist_ok=True)
+        if not df_leituras.empty:
+            df_leituras.to_parquet(_HIST_PARQUET, index=False)
+            logger.info(f"  Salvo: {_HIST_PARQUET}")
+        if not df_stations.empty:
+            df_stations.to_parquet(_INV_PARQUET, index=False)
+            df_stations.to_parquet(_RAW_DIR / "inmet_stations_rs.parquet", index=False)
+            logger.info(f"  Salvo: {_INV_PARQUET} ({len(df_stations)} estações RS)")
+        counts = upsert_inmet_duckdb(df_stations, df_leituras)
 
     duration = (datetime.now(tz=timezone.utc) - t0).total_seconds()
     logger.info("=" * 60)
     logger.success(
         f"INMET Histórico — concluído em {duration:.1f}s | "
-        f"{counts['stations']} estações | {counts['rain_readings']} leituras DuckDB"
+        f"{counts['stations']} estações | {counts['rain_readings']} leituras "
+        f"{'Supabase' if _HW_OK else 'DuckDB'}"
     )
     logger.info("=" * 60)
 
@@ -1001,7 +1044,11 @@ Exemplos:
     if args.mode == "inventory":
         client  = INMETClient()
         inv     = coletar_inventario_rs(client, force=args.force_inv)
-        counts  = upsert_inmet_duckdb(inv, pd.DataFrame())
+        if _HW_OK:
+            from database.hybrid_writer import HybridWriter as _HW
+            counts = {"stations": _HW().write_stations(inv, path=_INV_PARQUET).pg_rows, "rain_readings": 0}
+        else:
+            counts  = upsert_inmet_duckdb(inv, pd.DataFrame())
         print("\n--- Inventário INMET RS ---")
         print(f"  estacoes:        {len(inv)}")
         n_op = inv["active"].sum() if "active" in inv.columns else len(inv)

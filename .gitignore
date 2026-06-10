@@ -14,20 +14,27 @@ build/
 .env
 .env.local
 
-# Dados brutos grandes (usar Git LFS ou ignorar)
-data/raw/radar_images/
-data/raw/*.nc
-data/raw/*.hdf5
+# Banco de dados local (substituído pelo Supabase)
+data/climate.duckdb
+*.duckdb
 
-# Parquets gerados — vivem no climate-data-rs, não no código
-data/forecasts/*.parquet
+# Arquivos Parquet locais (substituídos pelo Cloudflare R2)
+data/raw/*.parquet
 data/processed/*.parquet
+data/forecasts/*.parquet
+
+# Dados brutos binários
+data/raw/
+data/processed/
+data/forecasts/
+*.nc
+*.hdf5
+*.tif
+*.tif.gz
+*.h5
 
 # Modelos treinados grandes (usar Git LFS)
-# models_saved/*.pt   ← gerenciado pelo Git LFS
-
-# DuckDB (commitar apenas se < 50MB)
-# data/climate.duckdb  ← pode commitar se pequeno
+models_saved/*.pt
 
 # IDE
 .vscode/settings.json

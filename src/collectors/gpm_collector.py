@@ -76,6 +76,16 @@ _OUT_DIR = _ROOT / "data" / "processed"
 _OUT_DIR.mkdir(parents=True, exist_ok=True)
 _PARQUET = _OUT_DIR / "gpm_precip_1d.parquet"
 
+# HybridWriter — importação tolerante para execução standalone
+try:
+    import sys as _sys
+    if str(_ROOT / "src") not in _sys.path:
+        _sys.path.insert(0, str(_ROOT / "src"))
+    from database.hybrid_writer import HybridWriter as _HybridWriter
+    _HW_OK = True
+except ImportError:
+    _HW_OK = False
+
 # Bounding box RS (com margem 0.5°)
 _RS_LAT_MIN: float = -34.0
 _RS_LAT_MAX: float = -27.0
@@ -642,9 +652,13 @@ def collect_gpm(days_back: int = 1) -> dict[str, int]:
 
     source = df["source"].iloc[0]
 
-    # 3. Salvar
-    _save_parquet(df)
-    upserted = _upsert_duckdb(df)
+    # 3. Persistência híbrida (Supabase PG + Cloudflare R2)
+    if _HW_OK:
+        res = _HybridWriter().write_gpm_precip(df)
+        upserted = res.pg_rows
+    else:
+        _save_parquet(df)
+        upserted = _upsert_duckdb(df)
 
     return {"points": len(df), "upserted": upserted, "source": source}
 
