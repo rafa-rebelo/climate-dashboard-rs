@@ -89,7 +89,12 @@ BASE_URL = f"{_CF_PROXY}/hidrowebservice" if _CF_PROXY else "https://www.ana.gov
 # ── Estações dos rios críticos do RS ─────────────────────────────────────────
 RIOS_RS: dict[str, dict] = {
     "Sinos": {
-        "codigos":           [87386000, 87374000, 87392000, 87358000],
+        # 11/06/2026: códigos antigos (87386000/87374000/87392000/87358000)
+        # estavam sem telemetria ou desativados — 0 leituras em 30 dias.
+        # Substituídos pelas telemétricas operantes validadas no inventário:
+        # 87382000 São Leopoldo (referência das cotas), 87380000 Campo Bom,
+        # 87376000 Foz do Paranhana.
+        "codigos":           [87382000, 87380000, 87376000],
         "cota_atencao_m":    3.5,
         "cota_alerta_m":     4.5,
         "cota_emergencia_m": 5.5,

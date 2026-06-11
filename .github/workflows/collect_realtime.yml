@@ -2,7 +2,9 @@ name: Coleta Hidrometeorológica RS
 
 on:
   schedule:
-    - cron: "*/10 * * * *"   # a cada 10 minutos
+    # Minutos deslocados do :00 — crons no minuto cheio sofrem mais
+    # throttle/drop no GitHub (observado: */10 executava a cada 2-4h)
+    - cron: "7,27,47 * * * *"
   workflow_dispatch:          # disparo manual
 
 concurrency:
