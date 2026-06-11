@@ -414,11 +414,16 @@ class HybridWriter:
                              status, percentual_cota, "timestamp")
                         VALUES %s
                         ON CONFLICT (rio_id) DO UPDATE SET
-                            rio_nome        = EXCLUDED.rio_nome,
-                            nivel_atual_m   = EXCLUDED.nivel_atual_m,
-                            vazao_m3s       = EXCLUDED.vazao_m3s,
-                            status          = EXCLUDED.status,
-                            "timestamp"     = EXCLUDED."timestamp"
+                            rio_nome          = EXCLUDED.rio_nome,
+                            nivel_atual_m     = EXCLUDED.nivel_atual_m,
+                            vazao_m3s         = EXCLUDED.vazao_m3s,
+                            cota_atencao_m    = EXCLUDED.cota_atencao_m,
+                            cota_alerta_m     = EXCLUDED.cota_alerta_m,
+                            cota_emergencia_m = EXCLUDED.cota_emergencia_m,
+                            status            = EXCLUDED.status,
+                            percentual_cota   = EXCLUDED.percentual_cota,
+                            "timestamp"       = EXCLUDED."timestamp",
+                            updated_at        = NOW()
                     """, rows, page_size=500)
                 conn.commit()
                 result.pg_rows = len(rows)
@@ -497,11 +502,15 @@ class HybridWriter:
                              status, percentual_cota, "timestamp")
                         VALUES %s
                         ON CONFLICT (rio_id) DO UPDATE SET
-                            rio_nome        = EXCLUDED.rio_nome,
-                            nivel_atual_m   = EXCLUDED.nivel_atual_m,
-                            status          = EXCLUDED.status,
-                            percentual_cota = EXCLUDED.percentual_cota,
-                            "timestamp"     = EXCLUDED."timestamp"
+                            rio_nome          = EXCLUDED.rio_nome,
+                            nivel_atual_m     = EXCLUDED.nivel_atual_m,
+                            cota_atencao_m    = EXCLUDED.cota_atencao_m,
+                            cota_alerta_m     = EXCLUDED.cota_alerta_m,
+                            cota_emergencia_m = EXCLUDED.cota_emergencia_m,
+                            status            = EXCLUDED.status,
+                            percentual_cota   = EXCLUDED.percentual_cota,
+                            "timestamp"       = EXCLUDED."timestamp",
+                            updated_at        = NOW()
                     """, rows, page_size=200)
                 conn.commit()
                 result.pg_rows = len(rows)
@@ -868,9 +877,12 @@ class HybridWriter:
                         VALUES %s
                         ON CONFLICT (station_id) DO UPDATE SET
                             precip_1h   = EXCLUDED.precip_1h,
+                            precip_6h   = EXCLUDED.precip_6h,
+                            precip_24h  = EXCLUDED.precip_24h,
                             temperatura = EXCLUDED.temperatura,
                             umidade     = EXCLUDED.umidade,
-                            "timestamp" = EXCLUDED."timestamp"
+                            "timestamp" = EXCLUDED."timestamp",
+                            updated_at  = NOW()
                     """, rows, page_size=200)
                 conn.commit()
                 result.pg_rows = len(rows)
