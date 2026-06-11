@@ -1,582 +1,324 @@
 """
 Agente 1 — Arquiteto de Dados
-Processador de acumulados de chuva e status de rios via SQL puro no DuckDB.
+Processador de acumulados de chuva — arquitetura híbrida v4 (sem DuckDB).
 
 Fluxo de execução:
-  1. Se rain_readings / river_levels estiverem vazios, ingere river_levels.parquet.
-  2. Calcula acumulados 1h/3h/6h/12h/24h/48h/72h/7d com CTEs + FILTER aggregates.
-  3. Calcula river_status (% da cota, tendência, classificação) em SQL puro.
-  4. Persiste rain_accumulated e river_status no DuckDB.
-  5. Exporta data/processed/accumulated_rain.parquet e river_status.parquet.
+  1. Baixa do R2 o Parquet mais recente de live_rain_readings
+     (série de ~30 dias gravada pelo inmet_collector a cada run).
+  2. Calcula acumulados 1h/3h/6h/12h/24h/48h/72h/7d por estação com pandas,
+     ancorados no MAX(ts) de cada estação (não em now() — robusto a lag).
+  3. UPSERT dos campos precip_1h/precip_6h/precip_24h na tabela
+     live_rain_readings do Supabase.
+  4. Upload do DataFrame completo de acumulados para o R2
+     (historico/rain_accumulated/…) e export local opcional para o
+     dashboard legado.
+
+O status dos rios NÃO é calculado aqui na v4 — o ana_collector já grava
+status/percentual em live_river_levels via HybridWriter.write_river_status.
 """
 
 from __future__ import annotations
 
+import io
+import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import pandas as pd
-import yaml
+from dotenv import load_dotenv
 from loguru import logger
 
 _SRC_DIR = Path(__file__).resolve().parents[2]
 if str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR / "src"))
 
-from database.db_manager import ClimateDB  # noqa: E402
-
-# ---------------------------------------------------------------------------
-# Caminhos padrão
-# ---------------------------------------------------------------------------
-
-_CONFIG_PATH   = Path(__file__).resolve().parents[2] / "config" / "config.yaml"
-_RAW_DIR       = Path(__file__).resolve().parents[2] / "data" / "raw"
-_PROC_DIR      = Path(__file__).resolve().parents[2] / "data" / "processed"
-_RIVER_PARQUET = _RAW_DIR  / "river_levels.parquet"
-_OUT_ACCUM     = _PROC_DIR / "accumulated_rain.parquet"
-_OUT_STATUS    = _PROC_DIR / "river_status.parquet"
-
-# ---------------------------------------------------------------------------
-# SQL — Migração de schema (idempotente)
-# ---------------------------------------------------------------------------
-
-_SQL_ADD_RAIN_7D = """
-    ALTER TABLE rain_accumulated
-    ADD COLUMN IF NOT EXISTS rain_7d DOUBLE DEFAULT 0
-"""
-
-# ---------------------------------------------------------------------------
-# SQL — Acumulados de chuva
-#
-# Usa MAX(ts) por estação como ancora temporal (não `now()`) para funcionar
-# corretamente quando os dados são históricos (ANA DIAS_7 etc.).
-# ---------------------------------------------------------------------------
-
-_SQL_RAIN_ACCUM = """
-INSERT OR REPLACE INTO rain_accumulated
-    (station_id, date,
-     rain_1h, rain_3h, rain_6h, rain_12h,
-     rain_24h, rain_48h, rain_72h, rain_7d,
-     updated_at)
-WITH latest AS (
-    SELECT station_id, MAX(ts) AS max_ts
-    FROM   rain_readings
-    GROUP  BY station_id
+from database.hybrid_writer import (  # noqa: E402
+    WriteResult,
+    _pg_connect,
+    _r2_client,
+    _r2_upload,
 )
-SELECT
-    r.station_id,
-    CAST(sl.max_ts AS DATE)                                                             AS date,
-    COALESCE(SUM(r.rain_1h_mm) FILTER (WHERE r.ts >= sl.max_ts - INTERVAL '1 hour'),   0) AS rain_1h,
-    COALESCE(SUM(r.rain_1h_mm) FILTER (WHERE r.ts >= sl.max_ts - INTERVAL '3 hours'),  0) AS rain_3h,
-    COALESCE(SUM(r.rain_1h_mm) FILTER (WHERE r.ts >= sl.max_ts - INTERVAL '6 hours'),  0) AS rain_6h,
-    COALESCE(SUM(r.rain_1h_mm) FILTER (WHERE r.ts >= sl.max_ts - INTERVAL '12 hours'), 0) AS rain_12h,
-    COALESCE(SUM(r.rain_1h_mm) FILTER (WHERE r.ts >= sl.max_ts - INTERVAL '24 hours'), 0) AS rain_24h,
-    COALESCE(SUM(r.rain_1h_mm) FILTER (WHERE r.ts >= sl.max_ts - INTERVAL '48 hours'), 0) AS rain_48h,
-    COALESCE(SUM(r.rain_1h_mm) FILTER (WHERE r.ts >= sl.max_ts - INTERVAL '72 hours'), 0) AS rain_72h,
-    COALESCE(SUM(r.rain_1h_mm) FILTER (WHERE r.ts >= sl.max_ts - INTERVAL '7 days'),   0) AS rain_7d,
-    now()                                                                                AS updated_at
-FROM   rain_readings r
-JOIN   latest        sl ON r.station_id = sl.station_id
-WHERE  r.ts >= sl.max_ts - INTERVAL '7 days'
-  AND  r.rain_1h_mm IS NOT NULL
-GROUP  BY r.station_id, sl.max_ts
-"""
+
+load_dotenv()
 
 # ---------------------------------------------------------------------------
-# SQL — Status dos rios
-#
-# {thresholds_values} é substituído por uma cláusula VALUES gerada em Python
-# com os limiares do config.yaml.
+# Constantes
 # ---------------------------------------------------------------------------
 
-_SQL_RIVER_STATUS_TEMPLATE = """
-WITH thresholds (river, cota_atencao_m, cota_alerta_m, cota_emergencia_m) AS (
-    VALUES {thresholds_values}
-),
-latest_levels AS (
-    SELECT
-        river,
-        station_id,
-        ARGMAX(level_m,  ts) AS level_m,
-        ARGMAX(flow_cms, ts) AS flow_cms,
-        MAX(ts)              AS ts
-    FROM   river_levels
-    WHERE  level_m IS NOT NULL
-    GROUP  BY river, station_id
-),
-levels_3h_ago AS (
-    SELECT
-        rl.river,
-        rl.station_id,
-        ARGMAX(rl.level_m, rl.ts) AS level_3h
-    FROM   river_levels rl
-    JOIN   latest_levels ll
-           ON rl.river = ll.river AND rl.station_id = ll.station_id
-    WHERE  rl.ts BETWEEN ll.ts - INTERVAL '4 hours'
-                     AND ll.ts - INTERVAL '2 hours'
-      AND  rl.level_m IS NOT NULL
-    GROUP  BY rl.river, rl.station_id
-)
-SELECT
-    l.river,
-    l.station_id                                              AS segment,
-    l.ts,
-    ROUND(l.level_m, 3)                                      AS level_m,
-    CASE
-        WHEN l.level_m >= t.cota_emergencia_m THEN 'EMERGENCIA'
-        WHEN l.level_m >= t.cota_alerta_m     THEN 'ALERTA'
-        WHEN l.level_m >= t.cota_atencao_m    THEN 'ATENCAO'
-        ELSE                                       'NORMAL'
-    END                                                       AS status,
-    CASE
-        WHEN l.level_m > COALESCE(la.level_3h, l.level_m) + 0.05 THEN 'SUBINDO'
-        WHEN l.level_m < COALESCE(la.level_3h, l.level_m) - 0.05 THEN 'DESCENDO'
-        ELSE                                                            'ESTAVEL'
-    END                                                       AS trend,
-    ROUND(l.level_m / NULLIF(t.cota_alerta_m, 0) * 100, 1)  AS pct_cota_alerta,
-    l.flow_cms
-FROM   latest_levels  l
-LEFT   JOIN thresholds   t  ON l.river = t.river
-LEFT   JOIN levels_3h_ago la ON l.river = la.river AND l.station_id = la.station_id
-WHERE  l.level_m IS NOT NULL
-ORDER  BY l.river, l.station_id
-"""
+_PROC_DIR  = Path(__file__).resolve().parents[2] / "data" / "processed"
+_OUT_ACCUM = _PROC_DIR / "accumulated_rain.parquet"
+
+_R2_RAIN_PREFIX = "historico/live_rain_readings"
+
+# Janelas de acumulação (nome da coluna → timedelta)
+_WINDOWS: dict[str, timedelta] = {
+    "rain_1h":  timedelta(hours=1),
+    "rain_3h":  timedelta(hours=3),
+    "rain_6h":  timedelta(hours=6),
+    "rain_12h": timedelta(hours=12),
+    "rain_24h": timedelta(hours=24),
+    "rain_48h": timedelta(hours=48),
+    "rain_72h": timedelta(hours=72),
+    "rain_7d":  timedelta(days=7),
+}
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Leitura da série de chuva no R2
 # ---------------------------------------------------------------------------
 
-def _load_config() -> dict[str, Any]:
-    """Carrega config.yaml com limiares dos rios e alertas.
+def _latest_rain_key(s3: Any, bucket: str, days_back: int = 3) -> Optional[str]:
+    """Encontra a chave do Parquet de chuva mais recente no R2.
 
-    Returns:
-        Dicionário com as seções do config.yaml.
-
-    Raises:
-        FileNotFoundError: Se config.yaml não for encontrado.
-    """
-    if not _CONFIG_PATH.exists():
-        raise FileNotFoundError(f"config.yaml não encontrado: {_CONFIG_PATH}")
-    with _CONFIG_PATH.open(encoding="utf-8") as fh:
-        return yaml.safe_load(fh)
-
-
-def _build_threshold_values(thresholds: dict[str, dict[str, float]]) -> str:
-    """Gera a cláusula VALUES para o CTE de limiares no SQL.
+    Varre as partições Hive de hoje para trás (até ``days_back`` dias)
+    e retorna a chave com o LastModified mais novo — evita listar o
+    bucket inteiro.
 
     Args:
-        thresholds: Dict {nome_rio: {cota_atencao_m, cota_alerta_m, cota_emergencia_m}}.
+        s3: Cliente boto3 configurado para o R2.
+        bucket: Nome do bucket R2.
+        days_back: Quantos dias retroceder na busca por partições.
 
     Returns:
-        String com tuplas SQL prontas para substituição em {thresholds_values}.
-
-    Example::
-
-        "('Sinos', 3.5, 4.5, 5.5), ('Taquari', 3.5, 5.0, 7.0)"
+        Chave S3 do Parquet mais recente, ou None se nada encontrado.
     """
-    rows = []
-    for river, cfg in thresholds.items():
-        atencao   = float(cfg.get("cota_atencao_m",    9999.0))
-        alerta    = float(cfg.get("cota_alerta_m",     9999.0))
-        emergencia = float(cfg.get("cota_emergencia_m", 9999.0))
-        rows.append(f"('{river}', {atencao}, {alerta}, {emergencia})")
-    return ", ".join(rows)
-
-
-def _table_row_count(db: ClimateDB, table: str) -> int:
-    """Retorna o número de linhas de uma tabela DuckDB.
-
-    Args:
-        db: Instância ClimateDB com conexão ativa.
-        table: Nome da tabela.
-
-    Returns:
-        Contagem de linhas (int >= 0).
-    """
-    row = db._con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
-    return row[0] if row else 0
-
-
-def _parquet_path_sql(path: Path) -> str:
-    """Converte Path para string com barras normalizadas para uso em SQL DuckDB.
-
-    Args:
-        path: Caminho do arquivo Parquet.
-
-    Returns:
-        String com separadores '/' (compatível com DuckDB read_parquet).
-    """
-    return str(path).replace("\\", "/")
-
-
-# ---------------------------------------------------------------------------
-# Ingestão de Parquet → DuckDB
-# ---------------------------------------------------------------------------
-
-def ingest_parquet(
-    db: ClimateDB,
-    parquet_path: Path = _RIVER_PARQUET,
-) -> dict[str, int]:
-    """Ingere river_levels.parquet no DuckDB (stations → rain_readings → river_levels).
-
-    Usa INSERT OR IGNORE para idempotência — execuções repetidas são seguras.
-    Insere stations primeiro para satisfazer a FK de rain_readings.
-
-    Args:
-        db: Instância ClimateDB com conexão ativa.
-        parquet_path: Caminho para river_levels.parquet.
-
-    Returns:
-        Dict com chaves stations, rain_readings, river_levels contendo
-        o número de linhas efetivamente inseridas.
-
-    Raises:
-        FileNotFoundError: Se o arquivo Parquet não existir.
-        duckdb.Error: Se alguma instrução SQL falhar.
-    """
-    if not parquet_path.exists():
-        raise FileNotFoundError(f"Parquet não encontrado: {parquet_path}")
-
-    pq = _parquet_path_sql(parquet_path)
-    logger.info(f"Ingerindo {parquet_path.name} → DuckDB...")
-
-    # 1 — Stations (stubs sem coordenadas — serão enriquecidos depois)
-    db._con.execute(f"""
-        INSERT OR IGNORE INTO stations
-            (station_id, name, source, lat, lon, river)
-        SELECT DISTINCT
-            CAST(station_code AS VARCHAR),
-            CAST(station_code AS VARCHAR),
-            'ANA',
-            0.0, 0.0,
-            rio_nome
-        FROM read_parquet('{pq}')
-        WHERE station_code IS NOT NULL
-    """)
-    db._con.commit()
-    n_stations = _table_row_count(db, "stations")
-
-    # 2 — Rain readings (linhas com chuva_mm não nulo)
-    before_rain = _table_row_count(db, "rain_readings")
-    db._con.execute(f"""
-        INSERT OR IGNORE INTO rain_readings
-            (id, station_id, ts, rain_1h_mm, source)
-        SELECT
-            nextval('seq_rain_readings'),
-            CAST(station_code AS VARCHAR),
-            timestamp,
-            chuva_mm,
-            'ANA'
-        FROM read_parquet('{pq}')
-        WHERE chuva_mm  IS NOT NULL
-          AND timestamp IS NOT NULL
-          AND station_code IS NOT NULL
-    """)
-    db._con.commit()
-    n_rain = _table_row_count(db, "rain_readings") - before_rain
-
-    # 3 — River levels (linhas com nivel_m não nulo)
-    before_levels = _table_row_count(db, "river_levels")
-    db._con.execute(f"""
-        INSERT OR IGNORE INTO river_levels
-            (id, river, station_id, ts, level_m, flow_cms, source)
-        SELECT
-            nextval('seq_river_levels'),
-            rio_nome,
-            CAST(station_code AS VARCHAR),
-            timestamp,
-            nivel_m,
-            vazao_m3s,
-            'ANA'
-        FROM read_parquet('{pq}')
-        WHERE nivel_m   IS NOT NULL
-          AND timestamp IS NOT NULL
-          AND station_code IS NOT NULL
-    """)
-    db._con.commit()
-    n_levels = _table_row_count(db, "river_levels") - before_levels
-
-    logger.success(
-        f"Ingestão concluída — stations: {n_stations}, "
-        f"rain_readings: +{n_rain}, river_levels: +{n_levels}"
-    )
-    return {"stations": n_stations, "rain_readings": n_rain, "river_levels": n_levels}
-
-
-# ---------------------------------------------------------------------------
-# Acumulados de chuva
-# ---------------------------------------------------------------------------
-
-def compute_rain_accumulated(db: ClimateDB) -> int:
-    """Calcula acumulados 1h/3h/6h/12h/24h/48h/72h/7d por estação via SQL puro.
-
-    Usa CTEs com FILTER aggregates ancorados no MAX(ts) de cada estação.
-    Resultados são escritos diretamente em rain_accumulated (INSERT OR REPLACE).
-
-    Args:
-        db: Instância ClimateDB com conexão ativa e rain_readings populada.
-
-    Returns:
-        Número de linhas gravadas em rain_accumulated.
-
-    Raises:
-        duckdb.Error: Se a query SQL falhar.
-    """
-    n_source = _table_row_count(db, "rain_readings")
-    if n_source == 0:
-        logger.warning("rain_readings está vazio — nada a acumular.")
-        return 0
-
-    # Garante que a coluna rain_7d existe (schema migration idempotente)
-    db._con.execute(_SQL_ADD_RAIN_7D)
-    db._con.commit()
-
-    db._con.execute(_SQL_RAIN_ACCUM)
-    db._con.commit()
-
-    n_result = _table_row_count(db, "rain_accumulated")
-    logger.success(
-        f"rain_accumulated: {n_result} registros calculados "
-        f"a partir de {n_source} leituras."
-    )
-    return n_result
-
-
-# ---------------------------------------------------------------------------
-# Status dos rios
-# ---------------------------------------------------------------------------
-
-def compute_river_status(
-    db: ClimateDB,
-    thresholds: dict[str, dict[str, float]] | None = None,
-    municipalities: dict[str, list[str]] | None = None,
-) -> int:
-    """Calcula status operacional dos rios via SQL e persiste em river_status.
-
-    Classifica cada estação em NORMAL/ATENCAO/ALERTA/EMERGENCIA conforme as
-    cotas do config.yaml. Calcula tendência (SUBINDO/ESTAVEL/DESCENDO) com
-    base na variação de nível nas últimas 3 horas.
-
-    Args:
-        db: Instância ClimateDB com conexão ativa e river_levels populada.
-        thresholds: Dict {rio: {cota_atencao_m, cota_alerta_m, cota_emergencia_m}}.
-                    Se None, carrega do config.yaml.
-        municipalities: Dict {rio: [municipios_em_risco]}.
-                        Se None, carrega do config.yaml.
-
-    Returns:
-        Número de linhas gravadas em river_status.
-
-    Raises:
-        FileNotFoundError: Se config.yaml não for encontrado e thresholds for None.
-        duckdb.Error: Se a query SQL falhar.
-    """
-    n_source = _table_row_count(db, "river_levels")
-    if n_source == 0:
-        logger.warning("river_levels está vazio — nada a processar.")
-        return 0
-
-    if thresholds is None or municipalities is None:
-        cfg = _load_config()
-        thresholds    = thresholds    or cfg.get("rios", {})
-        municipalities = municipalities or {
-            rio: v.get("municipios_risco", [])
-            for rio, v in cfg.get("rios", {}).items()
-        }
-
-    # Monta o VALUES clause com os limiares de todos os rios
-    threshold_values = _build_threshold_values(thresholds)
-    sql = _SQL_RIVER_STATUS_TEMPLATE.replace("{thresholds_values}", threshold_values)
-
-    df: pd.DataFrame = db._con.execute(sql).df()
-
-    if df.empty:
-        logger.warning("Nenhum nível de rio encontrado no DuckDB.")
-        return 0
-
-    # Enriquece com municípios em risco conforme status
-    df["municipalities_risk"] = df.apply(
-        lambda row: municipalities.get(row["river"], [])
-        if row["status"] in ("ATENCAO", "ALERTA", "EMERGENCIA")
-        else [],
-        axis=1,
-    )
-    df["updated_at"] = datetime.now(timezone.utc).replace(tzinfo=None)
-
-    # Persiste via INSERT OR REPLACE (PK: river + segment)
-    db._con.register("_river_status_temp", df)
-    db._con.execute("""
-        INSERT OR REPLACE INTO river_status
-            (river, segment, ts, level_m, status, trend,
-             municipalities_risk, updated_at)
-        SELECT
-            river, segment, ts, level_m, status, trend,
-            municipalities_risk,
-            updated_at
-        FROM _river_status_temp
-    """)
-    db._con.commit()
-    db._con.unregister("_river_status_temp")
-
-    n_result = _table_row_count(db, "river_status")
-
-    # Log resumo por rio
-    for _, row in df.iterrows():
-        pct = row.get("pct_cota_alerta", 0.0) or 0.0
-        logger.info(
-            f"  [{row['status']:10s}] {row['river']:12s} "
-            f"[{row['segment']}]: {row['level_m']:.2f}m "
-            f"({pct:.1f}% cota) — {row['trend']}"
+    now = datetime.now(timezone.utc)
+    candidatos: list[dict[str, Any]] = []
+    for d in range(days_back + 1):
+        dia = now - timedelta(days=d)
+        prefix = (
+            f"{_R2_RAIN_PREFIX}/ano={dia.year}"
+            f"/mes={dia.month:02d}/dia={dia.day:02d}/"
         )
+        resp = s3.list_objects_v2(Bucket=bucket, Prefix=prefix, MaxKeys=1000)
+        candidatos.extend(resp.get("Contents", []))
+        if candidatos:
+            break
+    if not candidatos:
+        return None
+    return max(candidatos, key=lambda o: o["LastModified"])["Key"]
 
-    logger.success(f"river_status: {n_result} segmentos atualizados.")
-    return n_result
+
+def load_rain_series_from_r2() -> pd.DataFrame:
+    """Baixa do R2 a série de leituras de chuva mais recente.
+
+    Returns:
+        DataFrame com colunas station_id, ts (tz-aware UTC) e rain_1h_mm.
+        Vazio se o R2 estiver indisponível ou sem Parquets recentes.
+    """
+    s3 = _r2_client()
+    bucket = os.getenv("R2_BUCKET_NAME", "")
+    if s3 is None or not bucket:
+        logger.warning("R2 indisponível — sem fonte de série de chuva.")
+        return pd.DataFrame()
+
+    key = _latest_rain_key(s3, bucket)
+    if key is None:
+        logger.warning("Nenhum Parquet de chuva encontrado no R2 (últimos 3 dias).")
+        return pd.DataFrame()
+
+    logger.info(f"Série de chuva: r2://{bucket}/{key}")
+    body = s3.get_object(Bucket=bucket, Key=key)["Body"].read()
+    df = pd.read_parquet(io.BytesIO(body))
+
+    if df.empty or "station_id" not in df.columns:
+        return pd.DataFrame()
+
+    df["ts"] = pd.to_datetime(df["ts"], utc=True, errors="coerce")
+    df["rain_1h_mm"] = pd.to_numeric(df.get("rain_1h_mm"), errors="coerce")
+    df = df.dropna(subset=["station_id", "ts"])
+    logger.info(
+        f"  {len(df):,} leituras | {df['station_id'].nunique()} estações "
+        f"| {df['ts'].min():%d/%m %H:%M} → {df['ts'].max():%d/%m %H:%M} UTC"
+    )
+    return df
 
 
 # ---------------------------------------------------------------------------
-# Exportação para Parquet
+# Cálculo dos acumulados
 # ---------------------------------------------------------------------------
 
-def export_accumulated_parquet(
-    db: ClimateDB,
+def compute_rain_accumulated(df: pd.DataFrame) -> pd.DataFrame:
+    """Calcula acumulados por estação ancorados no MAX(ts) de cada uma.
+
+    Args:
+        df: DataFrame com station_id, ts (UTC) e rain_1h_mm.
+
+    Returns:
+        DataFrame com 1 linha por estação: station_id, date (do MAX ts),
+        rain_1h…rain_7d e updated_at. Vazio se a entrada for vazia.
+    """
+    if df.empty:
+        logger.warning("Série de chuva vazia — nada a acumular.")
+        return pd.DataFrame()
+
+    chuva = df.dropna(subset=["rain_1h_mm"])
+    linhas: list[dict[str, Any]] = []
+    agora = datetime.now(timezone.utc)
+
+    for sid, grupo in chuva.groupby("station_id"):
+        max_ts = grupo["ts"].max()
+        row: dict[str, Any] = {
+            "station_id": str(sid),
+            "date":       max_ts.date(),
+            "updated_at": agora,
+        }
+        for col, janela in _WINDOWS.items():
+            row[col] = float(
+                grupo.loc[grupo["ts"] >= max_ts - janela, "rain_1h_mm"].sum()
+            )
+        linhas.append(row)
+
+    out = pd.DataFrame(linhas)
+    logger.success(f"rain_accumulated: {len(out)} estações calculadas.")
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Persistência — Supabase (UPSERT) + R2 + Parquet local
+# ---------------------------------------------------------------------------
+
+def upsert_accumulated_supabase(df_acc: pd.DataFrame) -> int:
+    """Grava precip_1h/6h/24h em live_rain_readings via UPDATE em lote.
+
+    UPDATE puro (não INSERT…ON CONFLICT): a linha da estação já existe
+    com "timestamp" NOT NULL gravado pelo inmet_collector — acumulado só
+    faz sentido para estação existente, e o caminho INSERT violaria a
+    constraint de timestamp nulo.
+
+    Args:
+        df_acc: Saída de compute_rain_accumulated().
+
+    Returns:
+        Número de estações efetivamente atualizadas no Supabase.
+    """
+    if df_acc.empty:
+        return 0
+
+    conn = _pg_connect()
+    if conn is None:
+        logger.warning("Supabase indisponível — acumulados não gravados no PG.")
+        return 0
+
+    import psycopg2
+    import psycopg2.extras
+
+    rows = [
+        (
+            str(r["station_id"]),
+            float(r["rain_1h"]),
+            float(r["rain_6h"]),
+            float(r["rain_24h"]),
+        )
+        for _, r in df_acc.iterrows()
+    ]
+    try:
+        with conn.cursor() as cur:
+            psycopg2.extras.execute_values(cur, """
+                UPDATE live_rain_readings AS l
+                SET precip_1h  = v.p1,
+                    precip_6h  = v.p6,
+                    precip_24h = v.p24,
+                    updated_at = NOW()
+                FROM (VALUES %s) AS v(station_id, p1, p6, p24)
+                WHERE l.station_id = v.station_id
+            """, rows, page_size=200)
+            atualizadas = cur.rowcount
+        conn.commit()
+        logger.success(
+            f"  PG live_rain_readings: acumulados de {atualizadas} estações."
+        )
+        return int(atualizadas)
+    except psycopg2.Error as exc:
+        logger.warning(f"  PG acumulados: {exc}")
+        conn.rollback()
+        return 0
+    finally:
+        conn.close()
+
+
+def upload_accumulated_r2(df_acc: pd.DataFrame) -> Optional[str]:
+    """Envia o DataFrame de acumulados completo (8 janelas) ao R2.
+
+    Args:
+        df_acc: Saída de compute_rain_accumulated().
+
+    Returns:
+        Chave S3 gravada, ou None se o upload não ocorreu.
+    """
+    if df_acc.empty:
+        return None
+    s3 = _r2_client()
+    if s3 is None:
+        return None
+    result = WriteResult(table="rain_accumulated")
+    _r2_upload(df_acc, "rain_accumulated", result, s3)
+    return result.r2_key
+
+
+def export_accumulated_local(
+    df_acc: pd.DataFrame,
     output_path: Path = _OUT_ACCUM,
 ) -> int:
-    """Exporta rain_accumulated do DuckDB para Parquet.
+    """Exporta acumulados para Parquet local (dashboard legado).
+
+    Best-effort: falha de escrita local não interrompe o pipeline.
 
     Args:
-        db: Instância ClimateDB com conexão ativa.
+        df_acc: Saída de compute_rain_accumulated().
         output_path: Destino do arquivo Parquet.
 
     Returns:
-        Número de linhas exportadas.
-
-    Raises:
-        duckdb.Error: Se a query falhar.
-        OSError: Se não for possível criar o diretório de saída.
+        Número de linhas exportadas (0 se vazio ou em falha de I/O).
     """
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    df: pd.DataFrame = db._con.execute("""
-        SELECT ra.station_id, ra.date,
-               ra.rain_1h, ra.rain_3h, ra.rain_6h, ra.rain_12h,
-               ra.rain_24h, ra.rain_48h, ra.rain_72h, ra.rain_7d,
-               ra.updated_at,
-               s.lat, s.lon,
-               s.name AS station_name,
-               s.municipality,
-               s.river
-        FROM   rain_accumulated ra
-        LEFT JOIN stations s ON s.station_id = ra.station_id
-        ORDER  BY ra.station_id, ra.date
-    """).df()
-    # lat=0.0 são stubs ANA sem coordenada real — substituir por NaN
-    df.loc[df["lat"] == 0.0, ["lat", "lon"]] = None
-    df.to_parquet(output_path, index=False, engine="pyarrow")
-    logger.info(f"accumulated_rain.parquet exportado: {output_path} ({len(df)} linhas)")
-    return len(df)
-
-
-def export_river_status_parquet(
-    db: ClimateDB,
-    output_path: Path = _OUT_STATUS,
-) -> int:
-    """Exporta river_status do DuckDB para Parquet.
-
-    Args:
-        db: Instância ClimateDB com conexão ativa.
-        output_path: Destino do arquivo Parquet.
-
-    Returns:
-        Número de linhas exportadas.
-
-    Raises:
-        duckdb.Error: Se a query falhar.
-        OSError: Se não for possível criar o diretório de saída.
-    """
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    df: pd.DataFrame = db._con.execute(
-        "SELECT * FROM river_status ORDER BY river, segment"
-    ).df()
-    df.to_parquet(output_path, index=False, engine="pyarrow")
-    logger.info(f"river_status.parquet exportado: {output_path} ({len(df)} linhas)")
-    return len(df)
+    if df_acc.empty:
+        return 0
+    try:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        df_acc.to_parquet(output_path, index=False, engine="pyarrow")
+        logger.info(f"accumulated_rain.parquet exportado: {output_path} ({len(df_acc)} linhas)")
+        return len(df_acc)
+    except OSError as exc:
+        logger.warning(f"Export local falhou (ignorado): {exc}")
+        return 0
 
 
 # ---------------------------------------------------------------------------
 # Orquestrador principal
 # ---------------------------------------------------------------------------
 
-def run_accumulator(
-    db: ClimateDB | None = None,
-    parquet_path: Path = _RIVER_PARQUET,
-    force_ingest: bool = False,
-) -> dict[str, Any]:
-    """Executa o pipeline completo de acumulados e status dos rios.
+def run_accumulator() -> dict[str, Any]:
+    """Executa o pipeline completo de acumulados de chuva (v4 híbrido).
 
-    Fluxo:
-    1. Verifica se DuckDB tem dados; se não, ingere do Parquet.
-    2. Calcula acumulados de chuva via SQL puro.
-    3. Calcula status dos rios via SQL puro.
-    4. Exporta resultados para Parquet.
-
-    Args:
-        db: Instância ClimateDB. Se None, abre conexão temporária.
-        parquet_path: Caminho do river_levels.parquet para ingestão.
-        force_ingest: Se True, reingere mesmo com tabelas populadas.
+    Fluxo: R2 (série 30d) → pandas (8 janelas) → Supabase (1h/6h/24h)
+    + R2 (acumulados completos) + Parquet local (dashboard legado).
 
     Returns:
-        Dict com chaves: ingested (bool), rain_rows (int), status_rows (int),
-        accum_parquet (str), status_parquet (str), duration_s (float).
-
-    Raises:
-        FileNotFoundError: Se parquet_path não existir e tabelas estiverem vazias.
+        Dict com chaves: source_rows (int), stations (int), pg_rows (int),
+        r2_key (str | None), local_rows (int), duration_s (float).
     """
     t_start = datetime.now(timezone.utc)
-    logger.info("=== RainAccumulator — iniciando pipeline ===")
+    logger.info("=== RainAccumulator v4 — R2 → Supabase ===")
 
-    _owns_db = db is None
-    if _owns_db:
-        db = ClimateDB()
+    serie  = load_rain_series_from_r2()
+    df_acc = compute_rain_accumulated(serie)
 
-    try:
-        ingested = False
-        rain_empty   = _table_row_count(db, "rain_readings") == 0
-        levels_empty = _table_row_count(db, "river_levels")  == 0
-
-        if force_ingest or rain_empty or levels_empty:
-            if parquet_path.exists():
-                ingest_parquet(db, parquet_path)
-                ingested = True
-            else:
-                logger.warning(
-                    f"Parquet não encontrado ({parquet_path}) e tabelas vazias. "
-                    "Acumulados não serão calculados."
-                )
-
-        rain_rows   = compute_rain_accumulated(db)
-        status_rows = compute_river_status(db)
-
-        accum_rows  = export_accumulated_parquet(db)
-        status_exp  = export_river_status_parquet(db)
-
-    finally:
-        if _owns_db:
-            db.close()
+    pg_rows    = upsert_accumulated_supabase(df_acc)
+    r2_key     = upload_accumulated_r2(df_acc)
+    local_rows = export_accumulated_local(df_acc)
 
     duration = (datetime.now(timezone.utc) - t_start).total_seconds()
     logger.info(f"=== Pipeline concluído em {duration:.1f}s ===")
 
     return {
-        "ingested":      ingested,
-        "rain_rows":     rain_rows,
-        "status_rows":   status_rows,
-        "accum_rows":    accum_rows,
-        "status_exported": status_exp,
-        "accum_parquet": str(_OUT_ACCUM),
-        "status_parquet": str(_OUT_STATUS),
-        "duration_s":    round(duration, 2),
+        "source_rows": int(len(serie)),
+        "stations":    int(len(df_acc)),
+        "pg_rows":     pg_rows,
+        "r2_key":      r2_key,
+        "local_rows":  local_rows,
+        "duration_s":  round(duration, 2),
     }
 
 
@@ -592,23 +334,7 @@ if __name__ == "__main__":
         level="DEBUG",
     )
 
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Processador de acumulados — Monitor RS")
-    parser.add_argument(
-        "--parquet", type=Path, default=_RIVER_PARQUET,
-        help="Caminho do river_levels.parquet (padrão: data/raw/river_levels.parquet)",
-    )
-    parser.add_argument(
-        "--force-ingest", action="store_true",
-        help="Reingere Parquet mesmo com tabelas DuckDB populadas",
-    )
-    args = parser.parse_args()
-
-    result = run_accumulator(
-        parquet_path=args.parquet,
-        force_ingest=args.force_ingest,
-    )
+    result = run_accumulator()
 
     print("\n--- Resultado -----------------------------------")
     for k, v in result.items():
