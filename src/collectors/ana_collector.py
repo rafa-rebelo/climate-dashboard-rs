@@ -66,6 +66,7 @@ from dotenv import load_dotenv
 from loguru import logger
 from tenacity import (
     retry,
+    retry_if_exception,
     retry_if_exception_type,
     stop_after_attempt,
     wait_exponential,
@@ -274,15 +275,42 @@ class ANAClient:
 
     # ── Autenticação ─────────────────────────────────────────────
 
+    @staticmethod
+    def _auth_erro_transitorio(exc: BaseException) -> bool:
+        """Indica se o erro de autenticação é transitório e vale retry.
+
+        A ANA retorna 417 de forma intermitente para IPs de saída da
+        Cloudflare (variam a cada request) — com as mesmas credenciais
+        que funcionam em outras tentativas. 429/5xx também são passageiros.
+
+        Args:
+            exc: Exceção capturada durante a autenticação.
+
+        Returns:
+            True se a exceção indicar falha transitória (vale retentar).
+        """
+        if isinstance(exc, niquests.exceptions.HTTPError) and exc.response is not None:
+            return exc.response.status_code in (417, 429, 500, 502, 503, 504)
+        return isinstance(exc, niquests.exceptions.RequestException)
+
+    @retry(
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=1, min=2, max=30),
+        retry=retry_if_exception(_auth_erro_transitorio.__func__),
+        reraise=True,
+    )
     def autenticar(self) -> str:
         """Obtém token SSO via GET /EstacoesTelemetricas/OAUth/v1.
+
+        Retry exponencial (5 tentativas, 2s → 30s) para 417/429/5xx —
+        a ANA rejeita intermitentemente requisições de IPs Cloudflare.
 
         Returns:
             Token JWT válido por ~60 minutos.
 
         Raises:
             ValueError: Se o token não estiver presente na resposta.
-            niquests.HTTPError: Se a requisição HTTP falhar.
+            niquests.HTTPError: Se a requisição HTTP falhar após retries.
         """
         logger.info("Autenticando na ANA HidroWeb...")
         resp = self.session.get(
