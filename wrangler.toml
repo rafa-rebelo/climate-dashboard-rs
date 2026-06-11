@@ -1,0 +1,10 @@
+# Cloudflare Worker — proxy ANA HidroWeb
+# Deploy: wrangler deploy  (ver cloudflare/DEPLOY_WORKER.md)
+
+name = "ana-proxy-rs"
+main = "cloudflare/ana_proxy_worker.js"
+compatibility_date = "2024-01-01"
+
+# Nenhum secret necessário: a autenticação (Identificador/Senha → Bearer)
+# é feita pelo ana_collector.py e os headers são repassados pelo Worker.
+# As credenciais da ANA ficam apenas no .env local e nos GitHub Secrets.

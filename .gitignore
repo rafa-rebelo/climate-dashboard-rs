@@ -13,6 +13,7 @@ build/
 # Variáveis de ambiente (NUNCA commitar)
 .env
 .env.local
+SECRETS_PARA_COLAR.txt
 
 # Banco de dados local (substituído pelo Supabase)
 data/climate.duckdb
@@ -51,3 +52,6 @@ logs/
 
 # Cache
 .cache/
+
+# Cloudflare Wrangler (estado local)
+.wrangler/
