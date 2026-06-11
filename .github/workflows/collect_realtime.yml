@@ -78,7 +78,7 @@ jobs:
   alerts:
     name: Verificar alertas
     runs-on: ubuntu-22.04
-    timeout-minutes: 3
+    timeout-minutes: 5
     needs: collect
     if: always()   # roda mesmo se collect falhar parcialmente
     env:
@@ -97,10 +97,21 @@ jobs:
           python-version: "3.11"
           cache: pip
 
-      # telegram_bot.py importa database.db_manager (duckdb), niquests e tenacity —
-      # instalar o requirements.txt completo evita ModuleNotFoundError (exit 1).
+      # Lista enxuta: requirements.txt completo puxa torch (~2 GB) e estoura o
+      # timeout do job. telegram_bot.py precisa de duckdb (via db_manager),
+      # niquests e tenacity além dos pacotes óbvios.
       - name: Instalar dependências (alertas)
-        run: pip install -r requirements.txt
+        run: |
+          pip install \
+            psycopg2-binary==2.9.9 \
+            python-telegram-bot==21.1.1 \
+            pyyaml==6.0.1 \
+            loguru==0.7.2 \
+            pandas==2.2.1 \
+            python-dotenv==1.0.1 \
+            duckdb==1.5.3 \
+            niquests==3.19.0 \
+            tenacity==8.2.3
 
       - name: Enviar alertas Telegram
         continue-on-error: true

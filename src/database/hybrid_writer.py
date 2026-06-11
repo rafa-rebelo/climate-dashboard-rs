@@ -376,11 +376,15 @@ class HybridWriter:
         df["_flow"]    = pd.to_numeric(df.get("vazao_m3s", None), errors="coerce")
         # status: usa coluna já computada pelo coletor ou deixa NULL
         df["_status"]  = df.get("status", df.get("alert_level", pd.Series(dtype=str)))
-        # Ordena por timestamp asc → ON CONFLICT DO UPDATE garante que
-        # a leitura MAIS RECENTE sobrescreve (live_river_levels tem PK = rio_id)
+        # live_river_levels tem PK = rio_id (snapshot, 1 linha por rio).
+        # Postgres proíbe atualizar a mesma linha 2x no mesmo INSERT
+        # ("ON CONFLICT DO UPDATE command cannot affect row a second time"),
+        # então o PG recebe só a leitura MAIS RECENTE de cada rio.
+        # A série completa vai para o R2 (df original, sem dedup).
         df_db = (
             df.dropna(subset=["_ts", "_rio_id", "_level"])
             .sort_values("_ts")
+            .drop_duplicates(subset="_rio_id", keep="last")
         )
 
         # ── Fluxo A: PostgreSQL ────────────────────────────────────────────
