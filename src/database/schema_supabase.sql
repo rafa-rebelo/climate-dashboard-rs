@@ -102,6 +102,26 @@ CREATE TABLE IF NOT EXISTS water_quality (
 );
 ALTER TABLE water_quality DISABLE ROW LEVEL SECURITY;
 
+-- ── alerts_log — histórico de alertas enviados ───────────────
+-- Também é a base do throttle anti-spam (janela de 1h por chave):
+-- o runner do GitHub Actions é efêmero, então a de-duplicação
+-- precisa ser persistente, não em memória.
+CREATE TABLE IF NOT EXISTS alerts_log (
+    id            BIGSERIAL PRIMARY KEY,
+    alert_key     TEXT NOT NULL,
+    alert_type    TEXT,
+    severity      TEXT,
+    rio_id        TEXT,
+    message       TEXT,
+    level_m       DOUBLE PRECISION,
+    threshold_m   DOUBLE PRECISION,
+    telegram_sent BOOLEAN DEFAULT FALSE,
+    sent_at       TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_alerts_key_time
+    ON alerts_log (alert_key, sent_at DESC);
+ALTER TABLE alerts_log DISABLE ROW LEVEL SECURITY;
+
 -- ── river_ai_forecasts — previsões LSTM (Fase 2, vazia) ──────
 CREATE TABLE IF NOT EXISTS river_ai_forecasts (
     rio_id          TEXT NOT NULL,

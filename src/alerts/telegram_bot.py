@@ -2,26 +2,33 @@
 Agente 3 — Engenheiro de Software
 Bot Telegram para alertas hidrometeorológicos do RS.
 
+Fonte de dados: Supabase PostgreSQL (arquitetura híbrida v4 — sem DuckDB).
+
 Funcionalidades:
-  - Alertas de nível de rio quando cruza cota de atenção/alerta/emergência
+  - Alertas de nível de rio quando status ∈ (ALERTA, EMERGENCIA)
+    lendo a tabela live_river_levels
   - Alertas de chuva intensa (1h/24h acima dos limiares do config.yaml)
-  - Throttling anti-spam: 1 alerta/rio/hora (evita flood em enchentes)
+    lendo a tabela live_rain_readings
+  - Throttling anti-spam PERSISTENTE: 1 alerta/chave/hora via alerts_log
+    (o runner do GitHub Actions é efêmero — memória não sobrevive entre runs)
   - Mensagens ricas em Markdown com emoji de severidade
   - Comando /status para consulta on-demand via polling
-  - Persiste alertas enviados em DuckDB (tabela alerts_log)
 """
 
 from __future__ import annotations
 
+import os
 import sys
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import niquests
-import pandas as pd
+import psycopg2
+import psycopg2.extras
 import yaml
+from dotenv import load_dotenv
 from loguru import logger
 from tenacity import (
     retry,
@@ -30,19 +37,13 @@ from tenacity import (
     wait_exponential,
 )
 
-_SRC_DIR = Path(__file__).resolve().parents[2]
-if str(_SRC_DIR) not in sys.path:
-    sys.path.insert(0, str(_SRC_DIR / "src"))
-
-from database.db_manager import ClimateDB  # noqa: E402
+load_dotenv()
 
 # ---------------------------------------------------------------------------
 # Constantes
 # ---------------------------------------------------------------------------
 
 _CONFIG_PATH  = Path(__file__).resolve().parents[2] / "config" / "config.yaml"
-_STATUS_PATH  = Path(__file__).resolve().parents[2] / "data" / "processed" / "river_status.parquet"
-_ACCUM_PATH   = Path(__file__).resolve().parents[2] / "data" / "processed" / "accumulated_rain.parquet"
 
 _TELEGRAM_API = "https://api.telegram.org/bot{token}"
 
@@ -55,8 +56,157 @@ _EMOJI: dict[str, str] = {
     "INFO":       "\U0001f4cb",   # 📋
 }
 
-# Throttle: intervalo mínimo em segundos entre alertas do mesmo rio
+# Throttle: intervalo mínimo em segundos entre alertas da mesma chave
 _THROTTLE_S = 3600   # 1 hora
+
+# Status que disparam alerta de rio (ATENCAO não notifica — só ALERTA+)
+_ALERT_STATUSES = ("ALERTA", "EMERGENCIA")
+
+
+# ---------------------------------------------------------------------------
+# Conexão Supabase
+# ---------------------------------------------------------------------------
+
+def _pg_connect() -> Optional["psycopg2.extensions.connection"]:
+    """Abre conexão com o Supabase PostgreSQL.
+
+    Prefere SUPABASE_DATABASE_URL_POOLER (Session Pooler IPv4 — necessário
+    no GitHub Actions, que não tem IPv6) com fallback para a conexão direta.
+
+    Returns:
+        Conexão psycopg2 aberta, ou None se as variáveis não existirem
+        ou a conexão falhar (alertas degradam para no-op, sem crash).
+    """
+    url = os.getenv("SUPABASE_DATABASE_URL_POOLER") or os.getenv("SUPABASE_DATABASE_URL")
+    if not url:
+        logger.warning("SUPABASE_DATABASE_URL(_POOLER) ausente — alertas sem fonte de dados.")
+        return None
+    try:
+        return psycopg2.connect(url, connect_timeout=30)
+    except psycopg2.OperationalError as exc:
+        logger.error(f"Conexão Supabase falhou: {exc}")
+        return None
+
+
+def _query(
+    conn: "psycopg2.extensions.connection",
+    sql: str,
+    params: tuple[Any, ...] = (),
+) -> list[dict[str, Any]]:
+    """Executa SELECT e retorna lista de dicts.
+
+    Args:
+        conn: Conexão psycopg2 aberta.
+        sql: Query SQL com placeholders %s.
+        params: Parâmetros da query.
+
+    Returns:
+        Lista de linhas como dicionários (RealDictCursor).
+
+    Raises:
+        psycopg2.Error: Se a query falhar.
+    """
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(sql, params)
+        return [dict(r) for r in cur.fetchall()]
+
+
+def _fetch_river_levels(conn: "psycopg2.extensions.connection") -> list[dict[str, Any]]:
+    """Lê o snapshot atual dos rios monitorados no Supabase.
+
+    Args:
+        conn: Conexão psycopg2 aberta.
+
+    Returns:
+        Lista de dicts com rio_id, rio_nome, nivel_atual_m, status,
+        percentual_cota, cota_alerta_m e timestamp.
+    """
+    return _query(conn, """
+        SELECT rio_id, rio_nome, nivel_atual_m, status,
+               percentual_cota, cota_alerta_m, "timestamp"
+        FROM live_river_levels
+        ORDER BY rio_nome
+    """)
+
+
+def _fetch_rain_readings(conn: "psycopg2.extensions.connection") -> list[dict[str, Any]]:
+    """Lê o snapshot de chuva por estação no Supabase.
+
+    Args:
+        conn: Conexão psycopg2 aberta.
+
+    Returns:
+        Lista de dicts com station_id, precip_1h e precip_24h.
+    """
+    return _query(conn, """
+        SELECT station_id, precip_1h, precip_24h
+        FROM live_rain_readings
+        WHERE precip_1h IS NOT NULL OR precip_24h IS NOT NULL
+    """)
+
+
+# ---------------------------------------------------------------------------
+# Throttle anti-spam persistente (alerts_log)
+# ---------------------------------------------------------------------------
+
+def _can_send(conn: "psycopg2.extensions.connection", key: str) -> bool:
+    """Verifica na alerts_log se a janela de 1h da chave já passou.
+
+    O throttle é persistido no banco porque o runner do GitHub Actions
+    é destruído após cada ciclo — estado em memória não sobrevive.
+
+    Args:
+        conn: Conexão psycopg2 aberta.
+        key: Chave única do alerta (ex.: 'river:guaiba:ALERTA').
+
+    Returns:
+        True se nenhum alerta da mesma chave foi enviado na última 1h.
+    """
+    rows = _query(conn, """
+        SELECT MAX(sent_at) AS last_sent
+        FROM alerts_log
+        WHERE alert_key = %s AND telegram_sent = TRUE
+    """, (key,))
+    last = rows[0]["last_sent"] if rows else None
+    if last is None:
+        return True
+    elapsed = (datetime.now(timezone.utc) - last).total_seconds()
+    return elapsed >= _THROTTLE_S
+
+
+def _log_alert(
+    conn: "psycopg2.extensions.connection",
+    key: str,
+    alert_type: str,
+    severity: str,
+    message: str,
+    rio_id: Optional[str] = None,
+    level_m: Optional[float] = None,
+    threshold_m: Optional[float] = None,
+    telegram_sent: bool = True,
+) -> None:
+    """Registra alerta enviado na alerts_log (histórico + base do throttle).
+
+    Args:
+        conn: Conexão psycopg2 aberta.
+        key: Chave única do alerta.
+        alert_type: NIVEL_RIO | CHUVA_INTENSA.
+        severity: ATENCAO | ALERTA | EMERGENCIA.
+        message: Texto enviado ao Telegram.
+        rio_id: Slug do rio (se aplicável).
+        level_m: Nível atual em metros (se aplicável).
+        threshold_m: Cota/limiar de referência (se aplicável).
+        telegram_sent: Se a mensagem foi efetivamente entregue.
+    """
+    with conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO alerts_log
+                (alert_key, alert_type, severity, rio_id, message,
+                 level_m, threshold_m, telegram_sent)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """, (key, alert_type, severity, rio_id, message,
+              level_m, threshold_m, telegram_sent))
+    conn.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -184,43 +334,33 @@ def _load_config() -> dict[str, Any]:
         return yaml.safe_load(fh)
 
 
-# ---------------------------------------------------------------------------
-# Throttle anti-spam
-# ---------------------------------------------------------------------------
+def _municipios_do_rio(config: dict[str, Any], rio_nome: str) -> list[str]:
+    """Busca municípios de risco do rio no config.yaml (chave tolerante).
 
-class AlertThrottle:
-    """Controla o intervalo mínimo entre alertas do mesmo key.
+    O banco guarda 'Guaíba'/'Lagoa_Patos' etc.; o config usa as mesmas
+    chaves — a comparação ignora acentos/caixa para robustez.
 
     Args:
-        interval_s: Intervalo mínimo em segundos entre alertas.
+        config: Dicionário do config.yaml.
+        rio_nome: Nome do rio como está no banco.
+
+    Returns:
+        Lista de municípios de risco (vazia se não encontrado).
     """
+    import unicodedata
 
-    def __init__(self, interval_s: int = _THROTTLE_S) -> None:
-        self._interval_s = interval_s
-        self._last: dict[str, datetime] = {}
+    def _slug(s: str) -> str:
+        return (
+            unicodedata.normalize("NFD", s)
+            .encode("ascii", "ignore").decode()
+            .lower().strip()
+        )
 
-    def can_send(self, key: str) -> bool:
-        """Verifica se pode enviar alerta para a chave dada.
-
-        Args:
-            key: Chave única do alerta (ex.: 'river:Guaíba:ALERTA').
-
-        Returns:
-            True se o intervalo desde o último envio já passou.
-        """
-        now  = datetime.now(timezone.utc)
-        last = self._last.get(key)
-        if last is None or (now - last).total_seconds() >= self._interval_s:
-            return True
-        return False
-
-    def mark_sent(self, key: str) -> None:
-        """Registra o envio de um alerta.
-
-        Args:
-            key: Chave única do alerta.
-        """
-        self._last[key] = datetime.now(timezone.utc)
+    alvo = _slug(rio_nome)
+    for nome, cfg in config.get("rios", {}).items():
+        if _slug(nome) == alvo:
+            return list(cfg.get("municipios_risco", []))
+    return []
 
 
 # ---------------------------------------------------------------------------
@@ -228,11 +368,10 @@ class AlertThrottle:
 # ---------------------------------------------------------------------------
 
 def _fmt_river_alert(
-    river: str,
-    segment: str,
+    rio_nome: str,
+    rio_id: str,
     level_m: float,
     status: str,
-    trend: str,
     pct_cota: float,
     cota_alerta_m: float,
     municipios: list[str],
@@ -240,11 +379,10 @@ def _fmt_river_alert(
     """Formata mensagem de alerta de nível de rio para Telegram (Markdown).
 
     Args:
-        river: Nome do rio.
-        segment: Código da estação/segmento.
+        rio_nome: Nome do rio.
+        rio_id: Slug/identificador do rio.
         level_m: Nível atual em metros.
-        status: NORMAL | ATENCAO | ALERTA | EMERGENCIA.
-        trend: SUBINDO | ESTAVEL | DESCENDO.
+        status: ALERTA | EMERGENCIA.
         pct_cota: Percentual da cota de alerta.
         cota_alerta_m: Cota de alerta em metros.
         municipios: Lista de municípios em risco.
@@ -252,16 +390,15 @@ def _fmt_river_alert(
     Returns:
         String formatada para envio via Telegram Markdown.
     """
-    emoji  = _EMOJI.get(status, "")
-    trend_icon = {"SUBINDO": "↑", "DESCENDO": "↓", "ESTAVEL": "→"}.get(trend, "")
+    emoji   = _EMOJI.get(status, "")
     mun_str = ", ".join(municipios[:4]) if municipios else "—"
     ts_str  = datetime.now(timezone.utc).strftime("%d/%m %H:%M UTC")
 
     return (
-        f"{emoji} *Alerta Hidro — Rio {river}*\n"
-        f"Nível: *{level_m:.2f} m* {trend_icon} ({pct_cota:.0f}% da cota)\n"
+        f"{emoji} *Alerta Hidro — Rio {rio_nome}*\n"
+        f"Nível: *{level_m:.2f} m* ({pct_cota:.0f}% da cota)\n"
         f"Status: *{status}* | Cota alerta: {cota_alerta_m:.1f} m\n"
-        f"Estação: `{segment}`\n"
+        f"Rio ID: `{rio_id}`\n"
         f"Municípios: {mun_str}\n"
         f"_{ts_str}_"
     )
@@ -298,33 +435,30 @@ def _fmt_rain_alert(
     return "\n".join(lines)
 
 
-def _fmt_status_summary(df_status: pd.DataFrame) -> str:
+def _fmt_status_summary(rios: list[dict[str, Any]]) -> str:
     """Formata resumo geral do status dos rios para o comando /status.
 
     Args:
-        df_status: DataFrame com colunas river, segment, level_m, status, trend.
+        rios: Linhas de live_river_levels como dicts.
 
     Returns:
         String formatada para Telegram Markdown.
     """
-    if df_status.empty:
+    if not rios:
         return "_Nenhum dado de nível disponível._"
 
     ts_str = datetime.now(timezone.utc).strftime("%d/%m %H:%M UTC")
     lines  = [f"*Monitor Hidro RS* — _{ts_str}_\n"]
 
-    for _, row in df_status.iterrows():
-        emoji      = _EMOJI.get(str(row.get("status", "NORMAL")), "")
-        trend_icon = {"SUBINDO": "↑", "DESCENDO": "↓", "ESTAVEL": "→"}.get(
-            str(row.get("trend", "")), ""
-        )
-        level = row.get("level_m")
-        pct   = row.get("pct_cota_alerta")
-        level_str = f"{level:.2f}m" if level is not None else "—"
-        pct_str   = f" ({pct:.0f}%)" if pct is not None else ""
+    for row in rios:
+        status = str(row.get("status") or "NORMAL")
+        emoji  = _EMOJI.get(status, "")
+        level  = row.get("nivel_atual_m")
+        pct    = row.get("percentual_cota")
+        level_str = f"{float(level):.2f}m" if level is not None else "—"
+        pct_str   = f" ({float(pct):.0f}%)" if pct is not None else ""
         lines.append(
-            f"{emoji} *{row['river']}* [{row['segment']}]: "
-            f"{level_str}{pct_str} {trend_icon}"
+            f"{emoji} *{row['rio_nome']}*: {level_str}{pct_str} — {status}"
         )
 
     return "\n".join(lines)
@@ -336,111 +470,89 @@ def _fmt_status_summary(df_status: pd.DataFrame) -> str:
 
 def check_river_alerts(
     client: TelegramClient,
-    db: ClimateDB,
-    throttle: AlertThrottle,
+    conn: "psycopg2.extensions.connection",
     config: dict[str, Any],
 ) -> int:
-    """Verifica níveis dos rios e envia alertas para status ≥ ATENCAO.
+    """Verifica níveis dos rios no Supabase e alerta status ALERTA/EMERGENCIA.
 
-    Lê river_status do DuckDB; para cada segmento fora de NORMAL, verifica
-    o throttle e envia mensagem Telegram se necessário.
+    Lê live_river_levels; para cada rio em status crítico, verifica o
+    throttle persistente (alerts_log, janela 1h) e envia Telegram.
 
     Args:
         client: TelegramClient configurado.
-        db: ClimateDB com conexão ativa.
-        throttle: AlertThrottle para controle de spam.
+        conn: Conexão psycopg2 com o Supabase.
         config: Dicionário do config.yaml (seção 'rios').
 
     Returns:
         Número de alertas enviados.
     """
-    df = db.get_river_status()
-    if df.empty:
-        logger.debug("river_status: sem dados.")
+    rios = _fetch_river_levels(conn)
+    if not rios:
+        logger.debug("live_river_levels: sem dados.")
         return 0
 
-    cfg_rios = config.get("rios", {})
     sent = 0
-
-    for _, row in df.iterrows():
-        status = str(row.get("status", "NORMAL"))
-        if status == "NORMAL":
+    for row in rios:
+        status = str(row.get("status") or "NORMAL")
+        if status not in _ALERT_STATUSES:
             continue
 
-        river   = str(row["river"])
-        segment = str(row["segment"])
-        key     = f"river:{river}:{status}"
+        rio_id   = str(row["rio_id"])
+        rio_nome = str(row.get("rio_nome") or rio_id)
+        key      = f"river:{rio_id}:{status}"
 
-        if not throttle.can_send(key):
-            logger.debug(f"Throttle ativo: {key}")
+        if not _can_send(conn, key):
+            logger.debug(f"Throttle ativo (1h): {key}")
             continue
 
-        rio_cfg        = cfg_rios.get(river, {})
-        cota_alerta_m  = float(rio_cfg.get("cota_alerta_m", 0))
-        municipios     = rio_cfg.get("municipios_risco", [])
-
-        level_m  = float(row.get("level_m") or 0)
-        trend    = str(row.get("trend", "ESTAVEL"))
-        pct_cota = float(row.get("pct_cota_alerta") or 0)
+        level_m       = float(row.get("nivel_atual_m") or 0)
+        pct_cota      = float(row.get("percentual_cota") or 0)
+        cota_alerta_m = float(row.get("cota_alerta_m") or 0)
+        municipios    = _municipios_do_rio(config, rio_nome)
 
         msg = _fmt_river_alert(
-            river, segment, level_m, status, trend,
+            rio_nome, rio_id, level_m, status,
             pct_cota, cota_alerta_m, municipios,
         )
 
         try:
             client.send_message(msg)
-            throttle.mark_sent(key)
-            db.log_alert(
-                alert_type    = "NIVEL_RIO",
-                severity      = status,
-                message       = msg,
-                location      = municipios[0] if municipios else None,
-                river         = river,
-                level_m       = level_m,
-                threshold_m   = cota_alerta_m,
-                telegram_sent = True,
+            _log_alert(
+                conn, key,
+                alert_type="NIVEL_RIO", severity=status, message=msg,
+                rio_id=rio_id, level_m=level_m, threshold_m=cota_alerta_m,
             )
             sent += 1
-            logger.warning(f"Alerta enviado: [{status}] Rio {river} [{segment}]")
+            logger.warning(f"Alerta enviado: [{status}] Rio {rio_nome}")
         except niquests.exceptions.RequestException as exc:
-            logger.error(f"Falha ao enviar alerta {river}: {exc}")
+            logger.error(f"Falha ao enviar alerta {rio_nome}: {exc}")
 
     return sent
 
 
 def check_rain_alerts(
     client: TelegramClient,
-    db: ClimateDB,
-    throttle: AlertThrottle,
+    conn: "psycopg2.extensions.connection",
     config: dict[str, Any],
 ) -> int:
-    """Verifica acumulados de chuva e envia alertas se limiares forem excedidos.
+    """Verifica acumulados de chuva no Supabase e alerta acima dos limiares.
 
-    Lê rain_accumulated do DuckDB; usa o limiar padrão da região mais crítica
-    (Vale_Taquari) como referência global — pode ser parametrizado por região.
+    Lê live_rain_readings (precip_1h/precip_24h); usa o limiar mais
+    conservador entre as regiões do config como referência global.
 
     Args:
         client: TelegramClient configurado.
-        db: ClimateDB com conexão ativa.
-        throttle: AlertThrottle para controle de spam.
+        conn: Conexão psycopg2 com o Supabase.
         config: Dicionário do config.yaml (seção 'alertas').
 
     Returns:
         Número de alertas de chuva enviados.
     """
-    # Busca acumulados mais recentes por estação
-    df: pd.DataFrame = db._con.execute("""
-        SELECT station_id, rain_1h, rain_24h
-        FROM rain_accumulated
-        QUALIFY ROW_NUMBER() OVER (PARTITION BY station_id ORDER BY date DESC) = 1
-    """).df()
-
-    if df.empty:
-        logger.debug("rain_accumulated: sem dados.")
+    leituras = _fetch_rain_readings(conn)
+    if not leituras:
+        logger.debug("live_rain_readings: sem dados de chuva.")
         return 0
 
-    # Limiares: usa média das regiões do config
     cfg_alertas = config.get("alertas", {})
     t1h_vals  = [v.get("rain_1h_critico_mm",  25) for v in cfg_alertas.values()]
     t24h_vals = [v.get("rain_24h_critico_mm", 60) for v in cfg_alertas.values()]
@@ -448,27 +560,25 @@ def check_rain_alerts(
     thr_24h   = min(t24h_vals)  if t24h_vals else 60.0
 
     sent = 0
-    for _, row in df.iterrows():
-        sid    = str(row["station_id"])
-        r1h    = float(row.get("rain_1h")  or 0)
-        r24h   = float(row.get("rain_24h") or 0)
+    for row in leituras:
+        sid  = str(row["station_id"])
+        r1h  = float(row.get("precip_1h")  or 0)
+        r24h = float(row.get("precip_24h") or 0)
 
         if r1h < thr_1h and r24h < thr_24h:
             continue
 
         key = f"rain:{sid}"
-        if not throttle.can_send(key):
+        if not _can_send(conn, key):
             continue
 
         msg = _fmt_rain_alert(sid, r1h, r24h, thr_1h, thr_24h)
         try:
             client.send_message(msg)
-            throttle.mark_sent(key)
-            db.log_alert(
-                alert_type    = "CHUVA_INTENSA",
-                severity      = "ALERTA",
-                message       = msg,
-                telegram_sent = True,
+            _log_alert(
+                conn, key,
+                alert_type="CHUVA_INTENSA", severity="ALERTA", message=msg,
+                level_m=r24h, threshold_m=thr_24h,
             )
             sent += 1
             logger.warning(f"Alerta chuva enviado: {sid} 1h={r1h}mm 24h={r24h}mm")
@@ -484,18 +594,18 @@ def check_rain_alerts(
 
 def process_commands(
     client: TelegramClient,
-    db: ClimateDB,
+    conn: "psycopg2.extensions.connection",
     last_update_id: int,
 ) -> int:
     """Processa comandos recebidos via Telegram polling.
 
     Comandos suportados:
-    - /status — resumo atual dos rios monitorados
+    - /status — resumo atual dos rios monitorados (Supabase)
     - /ping   — responde 'pong' (health check)
 
     Args:
         client: TelegramClient configurado.
-        db: ClimateDB com conexão ativa.
+        conn: Conexão psycopg2 com o Supabase.
         last_update_id: Último update_id processado (para offset).
 
     Returns:
@@ -512,12 +622,12 @@ def process_commands(
         if uid > last_update_id:
             last_update_id = uid
 
-        msg = upd.get("message", {})
+        msg  = upd.get("message", {})
         text = str(msg.get("text", "")).strip().lower()
 
-        if text in ("/status", "/status@"):
-            df_status = db.get_river_status()
-            reply     = _fmt_status_summary(df_status)
+        if text.startswith("/status"):
+            rios  = _fetch_river_levels(conn)
+            reply = _fmt_status_summary(rios)
             client.send_message(reply)
             logger.info("Comando /status respondido.")
         elif text == "/ping":
@@ -531,21 +641,18 @@ def process_commands(
 # ---------------------------------------------------------------------------
 
 def run_alert_cycle(
-    db: ClimateDB | None = None,
     token: str | None = None,
     chat_id: str | None = None,
-    throttle: AlertThrottle | None = None,
     last_update_id: int = 0,
 ) -> dict[str, Any]:
     """Executa um ciclo de verificação e disparo de alertas.
 
-    Verifica rios + chuva, processa comandos, retorna métricas do ciclo.
+    Conecta ao Supabase, verifica rios + chuva, processa comandos e
+    retorna métricas do ciclo. O throttle de 1h é persistente (alerts_log).
 
     Args:
-        db: ClimateDB. Se None, abre conexão temporária.
         token: Token do bot Telegram. Se None, lê de TELEGRAM_TOKEN env.
         chat_id: Chat destino. Se None, lê de TELEGRAM_CHAT_ID env.
-        throttle: AlertThrottle compartilhado. Se None, cria novo.
         last_update_id: Último update Telegram processado.
 
     Returns:
@@ -555,10 +662,6 @@ def run_alert_cycle(
     Raises:
         ValueError: Se token ou chat_id não forem fornecidos nem encontrados.
     """
-    import os
-    from dotenv import load_dotenv
-    load_dotenv()
-
     token   = token   or os.getenv("TELEGRAM_TOKEN")
     chat_id = chat_id or os.getenv("TELEGRAM_CHAT_ID")
 
@@ -569,22 +672,22 @@ def run_alert_cycle(
 
     t_start = datetime.now(timezone.utc)
     client  = TelegramClient(token, chat_id)
-    if throttle is None:
-        throttle = AlertThrottle()
+    config  = _load_config()
 
-    config = _load_config()
-
-    _owns_db = db is None
-    if _owns_db:
-        db = ClimateDB()
-
-    try:
-        river_n = check_river_alerts(client, db, throttle, config)
-        rain_n  = check_rain_alerts(client,  db, throttle, config)
-        last_update_id = process_commands(client, db, last_update_id)
-    finally:
-        if _owns_db:
-            db.close()
+    river_n = rain_n = 0
+    conn = _pg_connect()
+    if conn is None:
+        logger.error("Sem conexão Supabase — ciclo de alertas abortado.")
+    else:
+        try:
+            river_n = check_river_alerts(client, conn, config)
+            rain_n  = check_rain_alerts(client, conn, config)
+            last_update_id = process_commands(client, conn, last_update_id)
+        except psycopg2.Error as exc:
+            logger.error(f"Erro Supabase no ciclo de alertas: {exc}")
+            conn.rollback()
+        finally:
+            conn.close()
 
     duration = (datetime.now(timezone.utc) - t_start).total_seconds()
     if river_n + rain_n > 0:
@@ -612,7 +715,6 @@ def run_loop(
 ) -> None:
     """Executa o bot em loop contínuo com intervalo fixo.
 
-    Cria ThrottleAlert e ClimateDB compartilhados entre ciclos.
     Captura KeyboardInterrupt para encerrar graciosamente.
 
     Args:
@@ -620,10 +722,6 @@ def run_loop(
         token: Token do bot. Se None, usa TELEGRAM_TOKEN do .env.
         chat_id: Chat destino. Se None, usa TELEGRAM_CHAT_ID do .env.
     """
-    import os
-    from dotenv import load_dotenv
-    load_dotenv()
-
     token   = token   or os.getenv("TELEGRAM_TOKEN")
     chat_id = chat_id or os.getenv("TELEGRAM_CHAT_ID")
 
@@ -636,23 +734,17 @@ def run_loop(
         logger.error("Nao foi possivel conectar ao Telegram — abortando loop.")
         return
 
-    throttle       = AlertThrottle()
     last_update_id = 0
-
     logger.info(f"Bot iniciado — ciclos a cada {interval_s}s. Ctrl+C para parar.")
 
     try:
         while True:
-            with ClimateDB() as db:
-                result = run_alert_cycle(
-                    db=db,
-                    token=token,
-                    chat_id=chat_id,
-                    throttle=throttle,
-                    last_update_id=last_update_id,
-                )
-                last_update_id = result["last_update_id"]
-
+            result = run_alert_cycle(
+                token=token,
+                chat_id=chat_id,
+                last_update_id=last_update_id,
+            )
+            last_update_id = result["last_update_id"]
             time.sleep(interval_s)
 
     except KeyboardInterrupt:
@@ -672,9 +764,6 @@ if __name__ == "__main__":
     )
 
     import argparse
-    import os
-    from dotenv import load_dotenv
-    load_dotenv()
 
     parser = argparse.ArgumentParser(description="Bot Telegram — Monitor Hidro RS")
     parser.add_argument("--loop",     action="store_true",
