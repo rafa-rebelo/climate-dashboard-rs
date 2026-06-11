@@ -1,63 +1,169 @@
 """
-Agente 3 — Engenheiro de Software
-API REST FastAPI para o Monitor Hidrometeorológico RS.
+Agente 3 — Engenheiro de Software / API
+API REST FastAPI v3 — Monitor Hidrometeorológico RS
 
 Endpoints:
-  GET  /                         — health check
-  GET  /v1/rivers/status         — status atual de todos os rios
-  GET  /v1/rivers/{river}/levels — série temporal de nível por rio
-  GET  /v1/rain/accumulated      — acumulados de chuva por estação
-  GET  /v1/forecasts             — previsões NWP próximas 7 dias
-  GET  /v1/alerts                — alertas ativos não resolvidos
-  POST /v1/alerts/{id}/resolve   — marca alerta como resolvido
-  GET  /v1/stats                 — estatísticas do banco
+  GET  /health                       — status Supabase + R2
+  GET  /api/v3/rivers/status         — níveis e alertas (live_river_levels)
+  GET  /api/v3/weather/heatmap       — grade GPM precip (live_gpm_precip) GZip
+  GET  /api/v3/stations/readings     — leituras INMET (live_rain_readings)
+  GET  /api/v3/analytics/history     — histórico R2 por período (boto3 Parquet)
+  GET  /api/v3/forecasts/rivers      — previsões ML (river_ai_forecasts — Fase 2)
 
-Segurança: Bearer JWT via header Authorization.
-Rate limit: 60 req/min por IP (produção) ou 600 (dev).
-Deploy: Railway free tier — porta $PORT ou 8000.
+Deploy: Render Free Tier — PORT env var.
+Banco:  Supabase PostgreSQL via SUPABASE_DATABASE_URL_POOLER (Session Pooler IPv4).
+Store:  Cloudflare R2 — historico/{fonte}/ano={Y}/mes={MM}/dia={DD}/{fonte}_{ts}UTC.parquet
 """
 
 from __future__ import annotations
 
+import io
+import math
 import os
 import sys
-from datetime import datetime, timedelta, timezone
+import time
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-import duckdb
+import boto3
+import pandas as pd
+import psycopg2
+import psycopg2.extras
+import psycopg2.pool
+from botocore.config import Config as BotoConfig
+from botocore.exceptions import ClientError
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from jose import JWTError, jwt
 from loguru import logger
 from pydantic import BaseModel, Field
-from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.errors import RateLimitExceeded
-from slowapi.util import get_remote_address
 
 load_dotenv()
 
-_PROJECT_ROOT = Path(__file__).resolve().parents[2]
-_SRC_DIR      = _PROJECT_ROOT / "src"
-for _p in (str(_SRC_DIR), str(_PROJECT_ROOT)):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
-
-from database.db_manager import ClimateDB  # noqa: E402
+_SRC_DIR = Path(__file__).resolve().parent.parent
+if str(_SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(_SRC_DIR))
 
 # ---------------------------------------------------------------------------
-# Configuração JWT e rate limiting
+# Constantes e pool de conexão
 # ---------------------------------------------------------------------------
 
-_JWT_SECRET    = os.getenv("JWT_SECRET", "monitor-hidro-rs-dev-secret-change-in-prod")
-_JWT_ALGORITHM = "HS256"
-_JWT_EXP_H     = int(os.getenv("JWT_EXP_HOURS", "24"))
-_API_KEY       = os.getenv("API_KEY", "dev-key-monitor-rs")  # para gerar tokens
+_PG_URL: str = (
+    os.getenv("SUPABASE_DATABASE_URL_POOLER")
+    or os.getenv("SUPABASE_DATABASE_URL")
+    or ""
+)
 
-_limiter = Limiter(key_func=get_remote_address)
+_PG_POOL: psycopg2.pool.SimpleConnectionPool | None = None
+
+_STATUS_COLORS: dict[str, str] = {
+    "NORMAL":     "rgba(40,167,69,1.0)",
+    "ATENCAO":    "rgba(255,193,7,1.0)",
+    "ALERTA":     "rgba(253,126,20,1.0)",
+    "EMERGENCIA": "rgba(220,53,69,1.0)",
+}
+
+# TTL cache: {chave: (payload, monotonic_ts)}
+_CACHE: dict[str, tuple[Any, float]] = {}
+
+
+def _cache_get(key: str, ttl_s: int) -> Any | None:
+    """Retorna payload em cache se ainda válido, ou None."""
+    entry = _CACHE.get(key)
+    if entry and (time.monotonic() - entry[1]) < ttl_s:
+        return entry[0]
+    return None
+
+
+def _cache_set(key: str, payload: Any) -> None:
+    """Armazena payload no cache com timestamp atual."""
+    _CACHE[key] = (payload, time.monotonic())
+
+
+def _get_pool() -> psycopg2.pool.SimpleConnectionPool:
+    """Inicializa ou retorna o pool de conexão PostgreSQL.
+
+    Returns:
+        Pool com 1-5 conexões ao Supabase.
+
+    Raises:
+        RuntimeError: Se SUPABASE_DATABASE_URL* não estiver configurado.
+    """
+    global _PG_POOL
+    if _PG_POOL is None:
+        if not _PG_URL:
+            raise RuntimeError("SUPABASE_DATABASE_URL_POOLER não configurado.")
+        _PG_POOL = psycopg2.pool.SimpleConnectionPool(
+            1, 5, _PG_URL, connect_timeout=30
+        )
+    return _PG_POOL
+
+
+def _pg_query(sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
+    """Executa SELECT no Supabase e retorna lista de dicionários.
+
+    Args:
+        sql:    Query SQL com placeholders %s.
+        params: Parâmetros para a query.
+
+    Returns:
+        Lista de dicts com os resultados.
+
+    Raises:
+        HTTPException 503: Se a conexão falhar.
+        HTTPException 500: Em erros de banco inesperados.
+    """
+    pool = _get_pool()
+    conn = pool.getconn()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(sql, params)
+            return [dict(r) for r in cur.fetchall()]
+    except psycopg2.OperationalError as exc:
+        raise HTTPException(status_code=503, detail=f"Supabase indisponível: {exc}") from exc
+    except psycopg2.Error as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    finally:
+        pool.putconn(conn)
+
+
+def _s3_client() -> Any:
+    """Cria cliente boto3 apontado para o Cloudflare R2.
+
+    Returns:
+        boto3 S3 client configurado para R2.
+    """
+    return boto3.client(
+        "s3",
+        endpoint_url         = os.getenv("R2_ENDPOINT_URL"),
+        aws_access_key_id    = os.getenv("R2_ACCESS_KEY_ID"),
+        aws_secret_access_key= os.getenv("R2_SECRET_ACCESS_KEY"),
+        config               = BotoConfig(connect_timeout=10, read_timeout=60),
+    )
+
+
+def _safe_float(val: Any) -> float | None:
+    """Converte para float ou None se NaN/None."""
+    if val is None:
+        return None
+    try:
+        f = float(val)
+        return None if math.isnan(f) else f
+    except (TypeError, ValueError):
+        return None
+
+
+def _iso(val: Any) -> str | None:
+    """Converte datetime/str para ISO 8601 ou None."""
+    if val is None:
+        return None
+    if isinstance(val, datetime):
+        return val.isoformat()
+    return str(val)
+
 
 # ---------------------------------------------------------------------------
 # Aplicação FastAPI
@@ -66,579 +172,544 @@ _limiter = Limiter(key_func=get_remote_address)
 app = FastAPI(
     title       = "Monitor Hidrometeorológico RS",
     description = (
-        "API REST para dados hidrometeorológicos em tempo real do "
-        "Rio Grande do Sul. Cobre rios Sinos, Taquari, Jacuí, Guaíba, "
-        "Camaquã e Lagoa dos Patos."
+        "Dados hidrometeorológicos em tempo real do Rio Grande do Sul. "
+        "Rios: Sinos, Taquari, Jacuí, Guaíba, Camaquã, Lagoa dos Patos."
     ),
-    version     = "1.0.0",
-    docs_url    = "/docs",
-    redoc_url   = "/redoc",
+    version  = "3.0.0",
+    docs_url = "/docs",
+    redoc_url= "/redoc",
 )
 
-app.state.limiter = _limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
-
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 app.add_middleware(
     CORSMiddleware,
     allow_origins     = ["*"],
     allow_credentials = False,
-    allow_methods     = ["GET", "POST"],
-    allow_headers     = ["Authorization", "Content-Type"],
+    allow_methods     = ["GET"],
+    allow_headers     = ["*"],
 )
-
-_security = HTTPBearer(auto_error=False)
-
-
-# ---------------------------------------------------------------------------
-# Dependências: autenticação e banco
-# ---------------------------------------------------------------------------
-
-def _verify_token(
-    credentials: HTTPAuthorizationCredentials | None = Depends(_security),
-) -> dict[str, Any]:
-    """Verifica e decodifica o Bearer JWT.
-
-    Args:
-        credentials: Header Authorization do request.
-
-    Returns:
-        Payload do JWT como dicionário.
-
-    Raises:
-        HTTPException 401: Se token ausente, expirado ou inválido.
-    """
-    if credentials is None:
-        raise HTTPException(
-            status_code = status.HTTP_401_UNAUTHORIZED,
-            detail      = "Token JWT obrigatório.",
-            headers     = {"WWW-Authenticate": "Bearer"},
-        )
-    try:
-        payload: dict[str, Any] = jwt.decode(
-            credentials.credentials, _JWT_SECRET, algorithms=[_JWT_ALGORITHM]
-        )
-        return payload
-    except JWTError as exc:
-        raise HTTPException(
-            status_code = status.HTTP_401_UNAUTHORIZED,
-            detail      = f"Token inválido: {exc}",
-            headers     = {"WWW-Authenticate": "Bearer"},
-        ) from exc
-
-
-def _get_db() -> ClimateDB:
-    """Abre uma conexão DuckDB para o request.
-
-    Returns:
-        Instância ClimateDB conectada.
-    """
-    return ClimateDB()
 
 
 # ---------------------------------------------------------------------------
 # Schemas Pydantic
 # ---------------------------------------------------------------------------
 
-class TokenRequest(BaseModel):
-    api_key: str = Field(..., description="Chave de API para obter JWT")
-
-
-class TokenResponse(BaseModel):
-    access_token: str
-    token_type:   str = "bearer"
-    expires_in:   int
-
-
-class RiverStatusItem(BaseModel):
-    river:             str
-    segment:           str
-    level_m:           float | None
+class RioItem(BaseModel):
+    rio_id:            str
+    rio_nome:          str
+    nivel_atual_m:     float | None
+    cota_atencao_m:    float | None
+    cota_alerta_m:     float | None
+    cota_emergencia_m: float | None
+    percentual_cota:   float | None
     status:            str
-    trend:             str | None
-    pct_cota_alerta:   float | None
-    municipalities_risk: list[str] | None
-    updated_at:        datetime | None
+    status_color:      str
+    timestamp_leitura: str | None
 
 
-class RainAccumItem(BaseModel):
-    station_id: str
-    date:       str
-    rain_1h:    float
-    rain_3h:    float
-    rain_6h:    float
-    rain_24h:   float
-    rain_72h:   float
-    rain_7d:    float | None
-    updated_at: datetime | None
+class RiversStatusResponse(BaseModel):
+    timestamp:  str
+    total_rios: int
+    rios:       list[RioItem]
 
 
-class ForecastItem(BaseModel):
-    location_name:  str
-    valid_ts:       datetime
-    rain_mm:        float | None
-    temperature:    float | None
-    wind_speed:     float | None
-    cape_j_kg:      float | None
-    lifted_index:   float | None
-    model_source:   str
+class HeatmapPoint(BaseModel):
+    lat:       float
+    lon:       float
+    precip_mm: float | None
 
 
-class AlertItem(BaseModel):
-    id:           int
-    ts:           datetime
-    alert_type:   str
-    severity:     str
-    location:     str | None
-    river:        str | None
-    message:      str
-    level_m:      float | None
-    threshold_m:  float | None
-    telegram_sent: bool
+class HeatmapResponse(BaseModel):
+    timestamp:    str
+    total_pontos: int
+    pontos:       list[HeatmapPoint]
 
 
-class StatsResponse(BaseModel):
-    tables:         dict[str, int]
-    db_size_mb:     float
-    oldest_reading: str
-    newest_reading: str
-    generated_at:   datetime
+class StationReading(BaseModel):
+    station_id:   str
+    nome:         str | None
+    municipio:    str | None
+    precip_1h:    float | None
+    precip_6h:    float | None
+    precip_24h:   float | None
+    temperatura:  float | None
+    umidade:      float | None
+    timestamp:    str | None
+
+
+class StationsResponse(BaseModel):
+    timestamp:       str
+    total_estacoes:  int
+    estacoes:        list[StationReading]
+
+
+class HistoryPoint(BaseModel):
+    data:       str
+    fonte:      str
+    registros:  int
+    colunas:    list[str]
+    dados:      list[dict[str, Any]]
+
+
+class HistoryResponse(BaseModel):
+    timestamp:    str
+    data_source:  str
+    dias:         int
+    total_arquivos: int
+    total_registros: int
+    historico:    list[HistoryPoint]
+
+
+class RiverForecast(BaseModel):
+    rio_id:         str
+    rio_nome:       str | None
+    horizonte_h:    int
+    nivel_previsto_m: float | None
+    intervalo_inf_m:  float | None
+    intervalo_sup_m:  float | None
+    confianca_pct:    float | None
+    modelo:         str | None
+    gerado_em:      str | None
+
+
+class ForecastsResponse(BaseModel):
+    timestamp:  str
+    fase:       str
+    total:      int
+    previsoes:  list[RiverForecast]
 
 
 # ---------------------------------------------------------------------------
-# Endpoints
+# Endpoint 6 — GET /health
 # ---------------------------------------------------------------------------
 
-@app.get("/", tags=["Health"])
-@_limiter.limit("120/minute")
-async def health(request: Request) -> dict[str, str]:
-    """Health check — retorna status e versão."""
-    return {
-        "status":     "ok",
-        "service":    "Monitor Hidrometeorológico RS",
-        "version":    "1.0.0",
-        "timestamp":  datetime.now(timezone.utc).isoformat(),
+@app.get("/health", tags=["Sistema"], summary="Health check Supabase + R2")
+async def health() -> JSONResponse:
+    """Verifica conectividade com Supabase e Cloudflare R2.
+
+    Returns:
+        JSON com status de cada serviço e latências.
+    """
+    checks: dict[str, Any] = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "version": "3.0.0",
     }
 
+    # Supabase
+    t0 = time.monotonic()
+    try:
+        rows = _pg_query("SELECT COUNT(*) AS n FROM live_river_levels")
+        checks["supabase"] = {
+            "status": "ok",
+            "live_river_levels": rows[0]["n"] if rows else 0,
+            "latency_ms": round((time.monotonic() - t0) * 1000),
+        }
+    except HTTPException as exc:
+        checks["supabase"] = {"status": "error", "detail": exc.detail}
 
-@app.post("/v1/token", tags=["Auth"], response_model=TokenResponse)
-@_limiter.limit("10/minute")
-async def get_token(request: Request, body: TokenRequest) -> TokenResponse:
-    """Gera um JWT Bearer token a partir de uma API key.
+    # R2
+    t0 = time.monotonic()
+    try:
+        s3  = _s3_client()
+        bucket = os.getenv("R2_BUCKET_NAME", "")
+        s3.list_objects_v2(Bucket=bucket, MaxKeys=1)
+        checks["r2"] = {
+            "status": "ok",
+            "bucket": bucket,
+            "latency_ms": round((time.monotonic() - t0) * 1000),
+        }
+    except Exception as exc:  # noqa: BLE001
+        checks["r2"] = {"status": "error", "detail": str(exc)}
 
-    A API key é configurada via variável de ambiente `API_KEY`.
+    http_status = 200 if checks.get("supabase", {}).get("status") == "ok" else 503
+    return JSONResponse(content=checks, status_code=http_status)
 
-    Args:
-        body: Payload com api_key.
 
-    Returns:
-        TokenResponse com access_token e validade.
-
-    Raises:
-        HTTPException 401: Se a API key for inválida.
-    """
-    if body.api_key != _API_KEY:
-        raise HTTPException(
-            status_code = status.HTTP_401_UNAUTHORIZED,
-            detail      = "API key inválida.",
-        )
-    exp     = datetime.now(timezone.utc) + timedelta(hours=_JWT_EXP_H)
-    payload = {"sub": "api_client", "exp": exp}
-    token   = jwt.encode(payload, _JWT_SECRET, algorithm=_JWT_ALGORITHM)
-    return TokenResponse(
-        access_token = token,
-        expires_in   = _JWT_EXP_H * 3600,
-    )
-
+# ---------------------------------------------------------------------------
+# Endpoint 1 — GET /api/v3/rivers/status
+# ---------------------------------------------------------------------------
 
 @app.get(
-    "/v1/rivers/status",
-    tags     = ["Rios"],
-    response_model = list[RiverStatusItem],
-    summary  = "Status atual de todos os rios monitorados",
+    "/api/v3/rivers/status",
+    tags           = ["Rios"],
+    response_model = RiversStatusResponse,
+    summary        = "Status atual e nível dos rios monitorados",
 )
-@_limiter.limit("60/minute")
-async def rivers_status(
-    request: Request,
-    river:   str | None = Query(None, description="Filtro por nome do rio"),
-    _token:  dict       = Depends(_verify_token),
-    db:      ClimateDB  = Depends(_get_db),
-) -> list[RiverStatusItem]:
-    """Retorna o status operacional atual de cada segmento monitorado.
+async def rivers_status() -> RiversStatusResponse:
+    """Retorna nível atual, cotas e status de todos os rios.
 
-    Args:
-        river: Nome do rio para filtrar (opcional).
+    Dados de ``live_river_levels``. Cache 5 min.
 
     Returns:
-        Lista de RiverStatusItem com nível, status, tendência e municípios.
+        RiversStatusResponse com lista completa de rios.
     """
-    try:
-        df = db.get_river_status(river=river)
-    finally:
-        db.close()
+    cached = _cache_get("rivers_status", ttl_s=300)
+    if cached:
+        return cached
 
-    items: list[RiverStatusItem] = []
-    for _, row in df.iterrows():
-        mun = row.get("municipalities_risk")
-        if isinstance(mun, list):
-            pass
-        elif mun is not None:
-            mun = list(mun)
-        else:
-            mun = []
-        items.append(RiverStatusItem(
-            river             = str(row["river"]),
-            segment           = str(row["segment"]),
-            level_m           = _safe_float(row.get("level_m")),
-            status            = str(row.get("status", "NORMAL")),
-            trend             = str(row.get("trend", "ESTAVEL")),
-            pct_cota_alerta   = _safe_float(row.get("pct_cota_alerta")),
-            municipalities_risk = mun,
-            updated_at        = _safe_dt(row.get("updated_at")),
+    rows = _pg_query("""
+        SELECT rio_id, rio_nome, nivel_atual_m,
+               cota_atencao_m, cota_alerta_m, cota_emergencia_m,
+               percentual_cota, status, "timestamp"
+        FROM   live_river_levels
+        ORDER  BY rio_id
+    """)
+
+    rios: list[RioItem] = []
+    for r in rows:
+        status_str = str(r.get("status") or "NORMAL").upper()
+        rios.append(RioItem(
+            rio_id            = str(r["rio_id"]),
+            rio_nome          = str(r.get("rio_nome") or r["rio_id"]),
+            nivel_atual_m     = _safe_float(r.get("nivel_atual_m")),
+            cota_atencao_m    = _safe_float(r.get("cota_atencao_m")),
+            cota_alerta_m     = _safe_float(r.get("cota_alerta_m")),
+            cota_emergencia_m = _safe_float(r.get("cota_emergencia_m")),
+            percentual_cota   = _safe_float(r.get("percentual_cota")),
+            status            = status_str,
+            status_color      = _STATUS_COLORS.get(status_str, _STATUS_COLORS["NORMAL"]),
+            timestamp_leitura = _iso(r.get("timestamp")),
         ))
-    return items
 
+    resp = RiversStatusResponse(
+        timestamp  = datetime.now(timezone.utc).isoformat(),
+        total_rios = len(rios),
+        rios       = rios,
+    )
+    _cache_set("rivers_status", resp)
+    return resp
+
+
+# ---------------------------------------------------------------------------
+# Endpoint 2 — GET /api/v3/weather/heatmap
+# ---------------------------------------------------------------------------
 
 @app.get(
-    "/v1/rivers/{river}/levels",
-    tags    = ["Rios"],
-    summary = "Série temporal de nível por rio",
+    "/api/v3/weather/heatmap",
+    tags    = ["Precipitação"],
+    summary = "Grade de precipitação GPM para Folium/Leaflet (GZip)",
 )
-@_limiter.limit("30/minute")
-async def river_levels(
-    request:  Request,
-    river:    str,
-    hours:    int       = Query(72, ge=1, le=720, description="Horas para trás"),
-    _token:   dict      = Depends(_verify_token),
-    db:       ClimateDB = Depends(_get_db),
-) -> JSONResponse:
-    """Retorna série temporal de nível de um rio específico.
+async def weather_heatmap() -> JSONResponse:
+    """Retorna todos os pontos GPM do RS com precip_mm.
 
-    Args:
-        river: Nome do rio (ex.: Guaíba, Taquari).
-        hours: Janela de tempo em horas (1–720).
+    Dados de ``live_gpm_precip``. Cache 10 min. Comprimido via GZip.
 
     Returns:
-        JSON com lista de {ts, station_id, level_m, flow_cms}.
+        JSON com timestamp, total_pontos e lista de {lat, lon, precip_mm}.
     """
-    try:
-        df = db._con.execute("""
-            SELECT ts, station_id, level_m, flow_cms
-            FROM   river_levels
-            WHERE  river = ?
-              AND  ts >= now() - INTERVAL ? || ' hours'
-            ORDER BY ts DESC
-        """, [river, str(hours)]).df()
-    except duckdb.Error as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-    finally:
-        db.close()
+    cached = _cache_get("weather_heatmap", ttl_s=600)
+    if cached:
+        return JSONResponse(content=cached)
 
-    if df.empty:
-        return JSONResponse(content={"river": river, "data": []})
+    rows = _pg_query("""
+        SELECT latitude AS lat, longitude AS lon, precip_mm
+        FROM   live_gpm_precip
+        ORDER  BY lat, lon
+    """)
 
-    df["ts"] = df["ts"].astype(str)
-    return JSONResponse(content={
-        "river": river,
-        "hours": hours,
-        "count": len(df),
-        "data":  df.to_dict(orient="records"),
-    })
+    pontos = [
+        {
+            "lat":       float(r["lat"]),
+            "lon":       float(r["lon"]),
+            "precip_mm": _safe_float(r.get("precip_mm")),
+        }
+        for r in rows
+    ]
 
+    payload: dict[str, Any] = {
+        "timestamp":    datetime.now(timezone.utc).isoformat(),
+        "total_pontos": len(pontos),
+        "pontos":       pontos,
+    }
+    _cache_set("weather_heatmap", payload)
+    return JSONResponse(content=payload)
+
+
+# ---------------------------------------------------------------------------
+# Endpoint 3 — GET /api/v3/stations/readings
+# ---------------------------------------------------------------------------
 
 @app.get(
-    "/v1/rain/accumulated",
-    tags           = ["Chuva"],
-    response_model = list[RainAccumItem],
-    summary        = "Acumulados de chuva por estação",
+    "/api/v3/stations/readings",
+    tags           = ["Estações"],
+    response_model = StationsResponse,
+    summary        = "Última leitura de cada estação INMET",
 )
-@_limiter.limit("60/minute")
-async def rain_accumulated(
-    request:    Request,
-    station_id: str | None = Query(None, description="Filtro por estação"),
-    _token:     dict       = Depends(_verify_token),
-    db:         ClimateDB  = Depends(_get_db),
-) -> list[RainAccumItem]:
-    """Retorna o acumulado de chuva mais recente por estação.
+async def stations_readings(
+    station_id: str | None = Query(None, description="Filtro por station_id"),
+) -> StationsResponse:
+    """Retorna a leitura mais recente de cada estação em live_rain_readings.
+
+    Faz LEFT JOIN com ``stations`` para enriquecer com nome e município.
+    Cache 5 min.
 
     Args:
         station_id: Código da estação para filtrar (opcional).
 
     Returns:
-        Lista de RainAccumItem com acumulados 1h/3h/6h/24h/72h/7d.
+        StationsResponse com lista de estações e leituras.
     """
-    try:
-        where = "WHERE station_id = ?" if station_id else ""
-        params = [station_id] if station_id else []
-        df = db._con.execute(f"""
-            SELECT station_id, date, rain_1h, rain_3h, rain_6h, rain_12h,
-                   rain_24h, rain_48h, rain_72h,
-                   TRY_CAST(rain_7d AS DOUBLE) AS rain_7d,
-                   updated_at
-            FROM   rain_accumulated
-            {where}
-            QUALIFY ROW_NUMBER() OVER (PARTITION BY station_id ORDER BY date DESC) = 1
-            ORDER BY station_id
-        """, params).df()
-    except duckdb.Error as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-    finally:
-        db.close()
+    cache_key = f"stations_readings:{station_id or 'all'}"
+    cached = _cache_get(cache_key, ttl_s=300)
+    if cached:
+        return cached
 
-    items: list[RainAccumItem] = []
-    for _, row in df.iterrows():
-        items.append(RainAccumItem(
-            station_id = str(row["station_id"]),
-            date       = str(row["date"]),
-            rain_1h    = float(row.get("rain_1h")  or 0),
-            rain_3h    = float(row.get("rain_3h")  or 0),
-            rain_6h    = float(row.get("rain_6h")  or 0),
-            rain_24h   = float(row.get("rain_24h") or 0),
-            rain_72h   = float(row.get("rain_72h") or 0),
-            rain_7d    = _safe_float(row.get("rain_7d")),
-            updated_at = _safe_dt(row.get("updated_at")),
-        ))
-    return items
+    where  = "WHERE r.station_id = %s" if station_id else ""
+    params: tuple[Any, ...] = (station_id,) if station_id else ()
 
+    rows = _pg_query(f"""
+        SELECT r.station_id,
+               s.nome,
+               s.municipio,
+               r.precip_1h,
+               r.precip_6h,
+               r.precip_24h,
+               r.temperatura,
+               r.umidade,
+               r."timestamp"
+        FROM   live_rain_readings r
+        LEFT JOIN stations s ON s.station_id = r.station_id
+        {where}
+        ORDER  BY r.station_id
+    """, params)
 
-@app.get(
-    "/v1/forecasts",
-    tags           = ["Previsões"],
-    response_model = list[ForecastItem],
-    summary        = "Previsões NWP próximas 7 dias",
-)
-@_limiter.limit("30/minute")
-async def forecasts(
-    request:  Request,
-    location: str | None = Query(None, description="Filtro por localidade"),
-    hours:    int        = Query(48,  ge=1, le=168, description="Horas à frente"),
-    _token:   dict       = Depends(_verify_token),
-    db:       ClimateDB  = Depends(_get_db),
-) -> list[ForecastItem]:
-    """Retorna previsões meteorológicas NWP (Open-Meteo/NOAA).
-
-    Args:
-        location: Nome da localidade para filtrar (ex.: Porto Alegre).
-        hours: Horizonte de previsão em horas (1–168).
-
-    Returns:
-        Lista de ForecastItem com variáveis meteorológicas por hora.
-    """
-    try:
-        where  = "AND location_name = ?" if location else ""
-        params: list[Any] = [str(hours)]
-        if location:
-            params.append(location)
-        df = db._con.execute(f"""
-            SELECT location_name, valid_ts, rain_mm, temperature,
-                   wind_speed, cape_j_kg, lifted_index, model_source
-            FROM   forecasts
-            WHERE  valid_ts BETWEEN now() AND now() + INTERVAL ? || ' hours'
-              {where}
-            ORDER BY location_name, valid_ts
-            LIMIT  2016
-        """, params).df()
-    except duckdb.Error as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-    finally:
-        db.close()
-
-    items: list[ForecastItem] = []
-    for _, row in df.iterrows():
-        items.append(ForecastItem(
-            location_name = str(row["location_name"]),
-            valid_ts      = row["valid_ts"],
-            rain_mm       = _safe_float(row.get("rain_mm")),
-            temperature   = _safe_float(row.get("temperature")),
-            wind_speed    = _safe_float(row.get("wind_speed")),
-            cape_j_kg     = _safe_float(row.get("cape_j_kg")),
-            lifted_index  = _safe_float(row.get("lifted_index")),
-            model_source  = str(row.get("model_source", "")),
-        ))
-    return items
-
-
-@app.get(
-    "/v1/alerts",
-    tags           = ["Alertas"],
-    response_model = list[AlertItem],
-    summary        = "Alertas ativos não resolvidos",
-)
-@_limiter.limit("60/minute")
-async def active_alerts(
-    request:  Request,
-    severity: str | None = Query(
-        None,
-        description="Filtro por severidade: INFO | ATENCAO | ALERTA | EMERGENCIA",
-    ),
-    _token:  dict       = Depends(_verify_token),
-    db:      ClimateDB  = Depends(_get_db),
-) -> list[AlertItem]:
-    """Retorna os alertas ativos (não resolvidos).
-
-    Args:
-        severity: Filtro opcional por nível de severidade.
-
-    Returns:
-        Lista de AlertItem ordenada por data decrescente.
-    """
-    try:
-        df = db.get_active_alerts(severity=severity)
-    finally:
-        db.close()
-
-    items: list[AlertItem] = []
-    for _, row in df.iterrows():
-        items.append(AlertItem(
-            id            = int(row["id"]),
-            ts            = row["ts"],
-            alert_type    = str(row["alert_type"]),
-            severity      = str(row["severity"]),
-            location      = row.get("location"),
-            river         = row.get("river"),
-            message       = str(row["message"]),
-            level_m       = _safe_float(row.get("level_m")),
-            threshold_m   = _safe_float(row.get("threshold_m")),
-            telegram_sent = bool(row.get("telegram_sent", False)),
-        ))
-    return items
-
-
-@app.post(
-    "/v1/alerts/{alert_id}/resolve",
-    tags    = ["Alertas"],
-    summary = "Marca um alerta como resolvido",
-)
-@_limiter.limit("30/minute")
-async def resolve_alert(
-    request:  Request,
-    alert_id: int,
-    _token:   dict      = Depends(_verify_token),
-    db:       ClimateDB = Depends(_get_db),
-) -> dict[str, Any]:
-    """Marca um alerta como resolvido com timestamp atual.
-
-    Args:
-        alert_id: ID do alerta na tabela alerts_log.
-
-    Returns:
-        Confirmação com id e resolved_at.
-
-    Raises:
-        HTTPException 404: Se o alerta não for encontrado.
-    """
-    try:
-        result = db._con.execute("""
-            UPDATE alerts_log
-            SET    resolved    = TRUE,
-                   resolved_at = now()
-            WHERE  id          = ?
-        """, [alert_id])
-        db._con.commit()
-        rows = result.rowcount if result.rowcount >= 0 else 1
-    except duckdb.Error as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-    finally:
-        db.close()
-
-    if rows == 0:
-        raise HTTPException(
-            status_code = status.HTTP_404_NOT_FOUND,
-            detail      = f"Alerta {alert_id} não encontrado.",
+    estacoes = [
+        StationReading(
+            station_id  = str(r["station_id"]),
+            nome        = r.get("nome"),
+            municipio   = r.get("municipio"),
+            precip_1h   = _safe_float(r.get("precip_1h")),
+            precip_6h   = _safe_float(r.get("precip_6h")),
+            precip_24h  = _safe_float(r.get("precip_24h")),
+            temperatura = _safe_float(r.get("temperatura")),
+            umidade     = _safe_float(r.get("umidade")),
+            timestamp   = _iso(r.get("timestamp")),
         )
-    return {
-        "id":          alert_id,
-        "resolved":    True,
-        "resolved_at": datetime.now(timezone.utc).isoformat(),
-    }
+        for r in rows
+    ]
 
+    resp = StationsResponse(
+        timestamp      = datetime.now(timezone.utc).isoformat(),
+        total_estacoes = len(estacoes),
+        estacoes       = estacoes,
+    )
+    _cache_set(cache_key, resp)
+    return resp
+
+
+# ---------------------------------------------------------------------------
+# Endpoint 4 — GET /api/v3/analytics/history
+# ---------------------------------------------------------------------------
 
 @app.get(
-    "/v1/stats",
-    tags           = ["Sistema"],
-    response_model = StatsResponse,
-    summary        = "Estatísticas do banco de dados",
+    "/api/v3/analytics/history",
+    tags    = ["Analítica"],
+    summary = "Histórico de dados do R2 por período",
 )
-@_limiter.limit("10/minute")
-async def db_stats(
-    request: Request,
-    _token:  dict      = Depends(_verify_token),
-    db:      ClimateDB = Depends(_get_db),
-) -> StatsResponse:
-    """Retorna contagem de registros em cada tabela e tamanho do banco.
+async def analytics_history(
+    days: int = Query(
+        30, ge=1, le=90,
+        description="Quantidade de dias para trás (1–90)",
+    ),
+    station_id: str | None = Query(
+        None, description="Filtro por station_id (gpm e inmet)"
+    ),
+    data_source: Literal["gpm", "inmet", "ana"] = Query(
+        "gpm", description="Fonte de dados: gpm | inmet | ana"
+    ),
+) -> HistoryResponse:
+    """Baixa Parquets do R2 para o período e retorna série histórica.
+
+    Percorre ``historico/{data_source}/ano={Y}/mes={MM}/dia={DD}/``
+    para cada dia no intervalo, baixa via boto3 e agrega os DataFrames.
+
+    Args:
+        days:        Número de dias para trás (1–90).
+        station_id:  Filtro opcional por estação.
+        data_source: Fonte (gpm | inmet | ana).
 
     Returns:
-        StatsResponse com tabelas, tamanho em MB e timestamps extremos.
+        HistoryResponse com lista de HistoryPoint por dia.
     """
-    try:
-        stats = db.get_db_stats()
-    finally:
-        db.close()
+    cache_key = f"history:{data_source}:{days}:{station_id or 'all'}"
+    cached = _cache_get(cache_key, ttl_s=600)
+    if cached:
+        return cached
 
-    return StatsResponse(
-        tables         = stats["tables"],
-        db_size_mb     = stats["db_size_mb"],
-        oldest_reading = stats.get("oldest_reading", "N/A"),
-        newest_reading = stats.get("newest_reading", "N/A"),
-        generated_at   = datetime.now(timezone.utc),
+    fonte_map = {
+        "gpm":   "live_gpm_precip",
+        "inmet": "live_rain_readings",
+        "ana":   "live_river_levels",
+    }
+    fonte = fonte_map[data_source]
+    bucket = os.getenv("R2_BUCKET_NAME", "")
+
+    today   = date.today()
+    dates   = [today - timedelta(days=i) for i in range(days)]
+
+    try:
+        s3 = _s3_client()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"R2 indisponível: {exc}") from exc
+
+    historico: list[HistoryPoint] = []
+    total_registros = 0
+
+    for d in dates:
+        prefix = (
+            f"historico/{fonte}"
+            f"/ano={d.year}"
+            f"/mes={d.month:02d}"
+            f"/dia={d.day:02d}/"
+        )
+        try:
+            resp = s3.list_objects_v2(Bucket=bucket, Prefix=prefix)
+        except ClientError as exc:
+            logger.warning(f"R2 list falhou para {prefix}: {exc}")
+            continue
+
+        contents = resp.get("Contents", [])
+        if not contents:
+            continue
+
+        frames: list[pd.DataFrame] = []
+        for obj in contents:
+            try:
+                raw = s3.get_object(Bucket=bucket, Key=obj["Key"])
+                df  = pd.read_parquet(io.BytesIO(raw["Body"].read()))
+                if station_id and "station_id" in df.columns:
+                    df = df[df["station_id"] == station_id]
+                frames.append(df)
+            except ClientError as exc:
+                logger.warning(f"R2 get falhou para {obj['Key']}: {exc}")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"Parquet parse falhou para {obj['Key']}: {exc}")
+
+        if not frames:
+            continue
+
+        combined = pd.concat(frames, ignore_index=True)
+
+        # Converte timestamps para string (JSON-safe)
+        for col in combined.select_dtypes(include=["datetime64[ns]", "datetime64[ns, UTC]"]).columns:
+            combined[col] = combined[col].astype(str)
+
+        dados = combined.where(combined.notna(), other=None).to_dict(orient="records")
+        total_registros += len(dados)
+
+        historico.append(HistoryPoint(
+            data      = d.isoformat(),
+            fonte     = fonte,
+            registros = len(dados),
+            colunas   = list(combined.columns),
+            dados     = dados,
+        ))
+
+    resp_obj = HistoryResponse(
+        timestamp        = datetime.now(timezone.utc).isoformat(),
+        data_source      = data_source,
+        dias             = days,
+        total_arquivos   = sum(1 for h in historico),
+        total_registros  = total_registros,
+        historico        = historico,
     )
+    _cache_set(cache_key, resp_obj)
+    return resp_obj
 
 
 # ---------------------------------------------------------------------------
-# Helpers internos
+# Endpoint 5 — GET /api/v3/forecasts/rivers
 # ---------------------------------------------------------------------------
 
-def _safe_float(val: Any) -> float | None:
-    """Converte valor para float, retornando None em caso de falha.
+@app.get(
+    "/api/v3/forecasts/rivers",
+    tags           = ["Previsões ML"],
+    response_model = ForecastsResponse,
+    summary        = "Previsões ML de nível dos rios (Fase 2)",
+)
+async def forecasts_rivers(
+    rio_id: str | None = Query(None, description="Filtro por rio_id"),
+    horizonte_h: int   = Query(24, ge=6, le=72, description="Horizonte em horas"),
+) -> ForecastsResponse:
+    """Retorna previsões LSTM por bacia hidrográfica.
+
+    Tabela ``river_ai_forecasts`` — disponível na Fase 2 (modelos ML).
+    Retorna lista vazia enquanto os modelos estão em treinamento.
 
     Args:
-        val: Qualquer valor (float, int, str, None, NaN).
+        rio_id:      Filtro por rio (ex.: guaiba, sinos).
+        horizonte_h: Horizonte máximo de previsão em horas.
 
     Returns:
-        float ou None.
+        ForecastsResponse com lista de previsões (vazia na Fase 1).
     """
-    if val is None:
-        return None
+    cache_key = f"forecasts:{rio_id or 'all'}:{horizonte_h}"
+    cached = _cache_get(cache_key, ttl_s=300)
+    if cached:
+        return cached
+
     try:
-        f = float(val)
-        import math
-        return None if math.isnan(f) else f
-    except (TypeError, ValueError):
-        return None
+        where_parts = []
+        params: list[Any] = []
+        if rio_id:
+            where_parts.append("rio_id = %s")
+            params.append(rio_id)
+        if horizonte_h:
+            where_parts.append("horizonte_h <= %s")
+            params.append(horizonte_h)
+        where = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
 
+        rows = _pg_query(f"""
+            SELECT rio_id, rio_nome, horizonte_h,
+                   nivel_previsto_m, intervalo_inf_m, intervalo_sup_m,
+                   confianca_pct, modelo, gerado_em
+            FROM   river_ai_forecasts
+            {where}
+            ORDER  BY rio_id, horizonte_h
+        """, tuple(params))
+    except HTTPException:
+        # Tabela pode não existir na Fase 1
+        rows = []
 
-def _safe_dt(val: Any) -> datetime | None:
-    """Converte valor para datetime, retornando None em caso de falha.
+    previsoes = [
+        RiverForecast(
+            rio_id              = str(r["rio_id"]),
+            rio_nome            = r.get("rio_nome"),
+            horizonte_h         = int(r["horizonte_h"]),
+            nivel_previsto_m    = _safe_float(r.get("nivel_previsto_m")),
+            intervalo_inf_m     = _safe_float(r.get("intervalo_inf_m")),
+            intervalo_sup_m     = _safe_float(r.get("intervalo_sup_m")),
+            confianca_pct       = _safe_float(r.get("confianca_pct")),
+            modelo              = r.get("modelo"),
+            gerado_em           = _iso(r.get("gerado_em")),
+        )
+        for r in rows
+    ]
 
-    Args:
-        val: Timestamp ou string de data.
-
-    Returns:
-        datetime ou None.
-    """
-    if val is None:
-        return None
-    if isinstance(val, datetime):
-        return val
-    try:
-        return datetime.fromisoformat(str(val))
-    except (TypeError, ValueError):
-        return None
+    resp = ForecastsResponse(
+        timestamp = datetime.now(timezone.utc).isoformat(),
+        fase      = "Fase 1 — modelos em treinamento" if not previsoes else "Fase 2",
+        total     = len(previsoes),
+        previsoes = previsoes,
+    )
+    _cache_set(cache_key, resp)
+    return resp
 
 
 # ---------------------------------------------------------------------------
-# Entry point para uvicorn
+# Entry point
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     import uvicorn
 
     port = int(os.getenv("PORT", 8000))
-    logger.info(f"Iniciando API na porta {port}...")
+    logger.info(f"Iniciando Monitor Hidrometeorológico RS API na porta {port}...")
     uvicorn.run(
         "main:app",
-        host    = "0.0.0.0",
-        port    = port,
-        reload  = False,
-        workers = 1,
+        host      = "0.0.0.0",
+        port      = port,
+        reload    = False,
+        workers   = 1,
         log_level = "info",
     )
