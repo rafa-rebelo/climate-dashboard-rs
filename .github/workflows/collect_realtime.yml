@@ -53,6 +53,13 @@ jobs:
         continue-on-error: true
         run: python src/collectors/inmet_collector.py --mode=historico --dias=30
 
+      # gpm_collector usa earthaccess.login(strategy="netrc") — sem este arquivo
+      # o login NASA falha e o coletor cai no fallback CHIRPS (lag de 5-7 semanas)
+      - name: Configurar .netrc NASA Earthdata
+        run: |
+          printf 'machine urs.earthdata.nasa.gov\nlogin %s\npassword %s\n' "$NASA_USER" "$NASA_PASS" > ~/.netrc
+          chmod 600 ~/.netrc
+
       - name: Coletar precipitação satélite (GPM IMERG NASA)
         continue-on-error: true
         run: python src/collectors/gpm_collector.py

@@ -8,6 +8,7 @@ loguru==0.7.2
 tenacity==8.2.3
 requests==2.31.0
 requests-cache>=1.3.2  # 1.2.0 incompatível com urllib3 2.x (usado por niquests/openmeteo)
+niquests==3.19.0  # importado direto por ana_collector/inmet_collector/telegram_bot — pin explícito
 httpx==0.27.0
 
 # ── Banco de dados ────────────────────────────────────────────────
