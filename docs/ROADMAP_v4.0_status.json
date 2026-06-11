@@ -1,0 +1,272 @@
+{
+  "projeto": "Sistema Autônomo de Análise Climática RS",
+  "versao_roadmap": "4.1-Production-Scale",
+  "ultima_atualizacao": "2026-06-11 05:00 UTC",
+  "estrategia_arquitetural": "Arquitetura Híbrida de Custo Zero (Fase 1) → Infraestrutura Corporativa (Fase 2)",
+  "resumo_estimativas_globais": {
+    "total_horas_desenvolvimento": 136,
+    "custo_infraestrutura_fase_1": "R$ 0,00",
+    "custo_infraestrutura_fase_2": "R$ 165,00 a R$ 185,00 / mês"
+  },
+  "resumo_progresso": {
+    "fase_1": {
+      "total_etapas": 5,
+      "concluidas": 3,
+      "em_progresso": 0,
+      "pendentes": 2,
+      "percentual": "60%",
+      "status_geral": "🟢 EM ANDAMENTO — Etapas 1.1, 1.2 e 1.3 concluídas e validadas em produção (run #14)"
+    },
+    "fase_2": {
+      "total_etapas": 4,
+      "concluidas": 0,
+      "em_progresso": 0,
+      "pendentes": 4,
+      "percentual": "0%",
+      "status_geral": "⏸️ BLOQUEADA — Aguarda conclusão Fase 1 + contrato assinado"
+    }
+  },
+  "estado_atual_v4": {
+    "problema_critico_v3": "✅ RESOLVIDO — duckdb.IOException eliminado: GitHub Actions grava no Supabase/R2, nunca mais em arquivo local compartilhado",
+    "banco_atual": "Supabase PostgreSQL (camada quente) + Cloudflare R2 (camada fria)",
+    "coletores_status": "✅ TODOS migrados para HybridWriter (ANA, INMET, GPM, NOAA)",
+    "dados_existentes": {
+      "estacoes_ativas": 98,
+      "pontos_gpm_supabase": 23323,
+      "nota_gpm": "Grades CHIRPS (fallback) e GPM IMERG real têm lat_lon_key distintos — coexistem; cada grade faz UPSERT sobre si mesma",
+      "rios_monitorados": ["Guaíba", "Jacuí", "Taquari", "Sinos"],
+      "tabelas_supabase": [
+        "stations (98)",
+        "live_rain_readings (98)",
+        "live_river_levels (4)",
+        "live_gpm_precip (23.323)",
+        "river_ai_forecasts (0 — Fase 2)"
+      ]
+    },
+    "infraestrutura_existente": {
+      "github_actions": "⚠️ runs manuais 100% funcionais; cron */10 NÃO está disparando sozinho — investigar",
+      "cloudflare_worker": "✅ ana-proxy-rs deployado e validado (ANA 417 intermitente mitigado com retry 5x no autenticar)",
+      "streamlit_cloud": "⚠️ dashboard ainda acoplado ao DuckDB local (Etapa 1.4 pendente)",
+      "supabase": "✅ operacional — escrita validada run #14 (ANA+INMET+GPM)",
+      "cloudflare_r2": "✅ operacional — Parquets Hive-particionados a cada run",
+      "api_fastapi_v3": "✅ código pronto e testado local; deploy Render PENDENTE"
+    }
+  },
+  "pre_requisitos_antes_fase_1": {
+    "status": "✅ CONCLUÍDO",
+    "itens": [
+      {
+        "id": "PRE-1",
+        "tarefa": "Criar projeto no Supabase (Free Tier)",
+        "status": "✅ concluído — pooler aws-1-sa-east-1.pooler.supabase.com (ATENÇÃO ao hífen em sa-east-1; typo causou 2 dias de falha silenciosa)"
+      },
+      {
+        "id": "PRE-2",
+        "tarefa": "Criar bucket R2 no Cloudflare",
+        "status": "✅ concluído"
+      },
+      {
+        "id": "PRE-3",
+        "tarefa": "Criar R2 API Token Read/Write",
+        "status": "✅ concluído"
+      },
+      {
+        "id": "PRE-4",
+        "tarefa": "Adicionar secrets no GitHub Actions",
+        "status": "✅ concluído — 13 secrets no repo climate-dashboard-rs (não no climate-data-rs como planejado); faltam TELEGRAM_TOKEN e TELEGRAM_CHAT_ID"
+      },
+      {
+        "id": "PRE-5",
+        "tarefa": "Atualizar .env local no VSCode",
+        "status": "✅ concluído — inclui CF_WORKER_URL"
+      }
+    ]
+  },
+  "arquitetura_alvo": {
+    "camada_quente": {
+      "tecnologia": "Supabase PostgreSQL + PostGIS (Free Tier)",
+      "limite": "500MB",
+      "uso_atual": "< 50MB",
+      "tabelas_time_real": [
+        "live_gpm_precip (23.323 — duas grades: CHIRPS + IMERG)",
+        "live_rain_readings (98)",
+        "live_river_levels (4)"
+      ],
+      "estrategia_upsert": "ON CONFLICT (pk) DO UPDATE com updated_at = NOW() — corrigido em 840acf5; live_river_levels exige dedup por rio_id antes do upsert (2cd3f08)"
+    },
+    "camada_fria": {
+      "tecnologia": "Cloudflare R2 Object Storage",
+      "limite_gratuito": "10 GB (egress zero)",
+      "estrutura_paths": "historico/{fonte}/ano={YYYY}/mes={MM}/dia={DD}/{fonte}_{timestamp}UTC.parquet",
+      "compressao": "Parquet + Snappy",
+      "status": "✅ 30+ objetos; recebe série COMPLETA (Supabase recebe só snapshot)"
+    },
+    "api": {
+      "tecnologia": "FastAPI + Uvicorn (psycopg2 pool + boto3 R2 + GZip + cache TTL em memória)",
+      "deploy_fase_1": "Render Free Tier — Procfile pronto, deploy PENDENTE",
+      "endpoints_implementados": 6
+    },
+    "frontend": {
+      "tecnologia": "Streamlit Community Cloud",
+      "modelo_alvo": "100% stateless via FastAPI",
+      "status": "⚠️ ainda acoplado ao DuckDB — Etapa 1.4"
+    },
+    "proxy_ana": {
+      "tecnologia": "Cloudflare Worker (cloudflare/ana_proxy_worker.js + wrangler.toml)",
+      "url": "https://ana-proxy-rs.rafa-rebelo.workers.dev",
+      "desenho": "Pass-through transparente de path+query+headers para www.ana.gov.br/hidrowebservice; SEM credenciais no Worker; filtro anti-proxy-aberto (404 fora de /hidrowebservice/)",
+      "armadilha_conhecida": "ANA retorna 417 intermitente para IPs de saída Cloudflare — mitigado com retry exponencial 5x no autenticar() (commit 870a7e1)"
+    }
+  },
+  "fases_projeto": {
+    "FASE_1_REESTRUTURACAO_E_VALIDACAO": {
+      "objetivo_geral": "Eliminar travamentos DuckDB, criar API isolada, preparar validação comercial com custo R$ 0,00",
+      "modelo_custo": "R$ 0,00",
+      "status": "🟢 60% — 1.1 ✅ | 1.2 ✅ | 1.3 ✅ (deploy pendente) | 1.4 🔴 | 1.5 🔴",
+      "etapas": [
+        {
+          "id": "1.1",
+          "nome": "Setup do Banco de Dados Relacional e Geoespacial",
+          "status": "✅ CONCLUÍDA",
+          "evidencias": [
+            "Tabelas criadas via Supabase SQL Editor (schema não versionado em arquivo — schema_supabase.sql/db_supabase.py não existem no repo; acesso é via HybridWriter)",
+            "PostGIS ativo (2 colunas geometry registradas)",
+            "RLS desabilitado para escrita via psycopg2"
+          ],
+          "desvio_do_plano": "Não foi criada classe SupabaseDB separada — o HybridWriter (1.2) absorveu o papel de camada de acesso"
+        },
+        {
+          "id": "1.2",
+          "nome": "Refatoração do Pipeline de Ingestão Híbrida",
+          "status": "✅ CONCLUÍDA E VALIDADA EM PRODUÇÃO (run #14, 11/06/2026)",
+          "evidencias": [
+            "src/database/hybrid_writer.py criado (dual-write PG+R2, WriteResult, falhas isoladas)",
+            "4 coletores migrados: gpm, inmet, ana e TAMBÉM noaa (commit 23f6113, além do planejado)",
+            "Workflow sem commits de dados; .gitignore limpo; binários removidos do repo",
+            "ANA real via CF Worker: níveis+vazão gravados (Guaíba 1,29m, Taquari 1,33m, Jacuí 0,66m)",
+            "GPM IMERG real (não CHIRPS) após fix .netrc NASA no runner (d43a795)"
+          ],
+          "correcoes_pos_implementacao": [
+            "dd42dfe — job alerts: dependências completas",
+            "d43a795 — .netrc NASA Earthdata + pin niquests==3.19.0",
+            "840acf5 — ON CONFLICT atualiza cotas/percentual/vazão/updated_at",
+            "870a7e1 — retry 5x no autenticar() ANA (417 intermitente)",
+            "2cd3f08 — dedup rio_id no upsert (cannot affect row a second time) + alerts slim/timeout 5min"
+          ]
+        },
+        {
+          "id": "1.3",
+          "nome": "Camada de Serviços FastAPI",
+          "status": "✅ CÓDIGO CONCLUÍDO E TESTADO LOCAL — deploy Render PENDENTE",
+          "evidencias": [
+            "src/api/main.py reescrito sobre Supabase+R2 (commit 06e4948): pool psycopg2, cache TTL, GZip, RGBA status colors",
+            "6 endpoints (1 a mais que o planejado): /health, rivers/status, weather/heatmap, stations/readings, analytics/history (R2), forecasts/rivers",
+            "Procfile criado na raiz",
+            "Testado contra banco ao vivo: 4 rios, 98 estações"
+          ],
+          "desvio_do_plano": "models.py e start.py não criados — main.py é autocontido; endpoint extra stations/readings",
+          "pendente": "Criar Web Service no Render apontando para o repo"
+        },
+        {
+          "id": "1.4",
+          "nome": "Desacoplamento do Frontend Streamlit",
+          "status": "🔴 PENDENTE",
+          "nota": "Dashboard ainda importa duckdb e lê arquivos locais; ganhou camada NWP no mapa (23f6113) mas o desacoplamento via FastAPI não começou. Depende do deploy da API (1.3)"
+        },
+        {
+          "id": "1.5",
+          "nome": "Homologação Técnica e Apresentação para Design Partners",
+          "status": "🔴 PENDENTE",
+          "dependencia": "Etapa 1.4 concluída"
+        }
+      ]
+    },
+    "FASE_2_ESCALA_COMERCIAL_E_SUSTENTABILIDADE": {
+      "status": "⏸️ BLOQUEADA — aguarda Fase 1 completa + carta de intenção",
+      "nota_2_2": "Histórico no R2 começou a acumular em 10-11/06/2026 — LSTM destravável a partir de ~10-11/07/2026 (30 dias de dados)",
+      "etapas_resumo": [
+        "2.1 Migração de tiers (Supabase Pro + Render Paid) — ⏸️",
+        "2.2 Modelos LSTM (aguarda 30+ dias de histórico R2) — ⏸️",
+        "2.3 Alertas proativos B2B (Telegram + webhooks) — ⏸️",
+        "2.4 Sustentação/health_check — ⏸️"
+      ]
+    }
+  },
+  "pendencias_operacionais_imediatas": [
+    {
+      "item": "Cron */10 do GitHub Actions não dispara sozinho (todos os runs até #14 foram manuais)",
+      "acao": "Verificar runs 'Scheduled' na lista do Actions; se ausentes, investigar registro da agenda",
+      "prioridade": "🔴 ALTA — sem cron não há coleta autônoma"
+    },
+    {
+      "item": "Secrets TELEGRAM_TOKEN e TELEGRAM_CHAT_ID não criados no climate-dashboard-rs",
+      "acao": "Copiar do .env local → GitHub Secrets",
+      "prioridade": "🟡 MÉDIA — job alerts falha só por isso"
+    },
+    {
+      "item": "Workflow antigo do climate-data-rs ainda ativo (código velho, escrita concorrente)",
+      "acao": "Desativar após confirmar cron do novo repo (Actions → Disable workflow)",
+      "prioridade": "🟡 MÉDIA"
+    },
+    {
+      "item": "Deploy da API no Render Free Tier",
+      "acao": "render.com → New Web Service → repo climate-dashboard-rs (Procfile pronto)",
+      "prioridade": "🟡 MÉDIA — pré-requisito da Etapa 1.4"
+    },
+    {
+      "item": "Rio Sinos sem dados da ANA nos últimos ciclos (4 estações retornam vazio)",
+      "acao": "Observar próximos runs; se persistir, buscar estações alternativas no inventário",
+      "prioridade": "🟢 BAIXA"
+    },
+    {
+      "item": "Rotacionar senha do banco Supabase (exposta em chat de desenvolvimento)",
+      "acao": "Supabase → Settings → Database → Reset password → atualizar .env + secret",
+      "prioridade": "🟢 BAIXA (fazer quando estável)"
+    }
+  ],
+  "estrutura_repositorio_atual": {
+    "src": {
+      "collectors": [
+        "gpm_collector.py ✅ HybridWriter",
+        "inmet_collector.py ✅ HybridWriter",
+        "ana_collector.py ✅ HybridWriter + CF Worker + retry 417",
+        "noaa_collector.py ✅ HybridWriter (23f6113)"
+      ],
+      "database": [
+        "db_manager.py ✅ (legado DuckDB — remover na Fase 2)",
+        "hybrid_writer.py ✅ OPERACIONAL",
+        "schema_supabase.sql ❌ não versionado (schema criado direto no SQL Editor)",
+        "db_supabase.py ❌ não criado (HybridWriter absorveu o papel)"
+      ],
+      "api": [
+        "main.py ✅ v3 Supabase+R2 (6 endpoints)",
+        "models.py ❌ não necessário (main.py autocontido)",
+        "start.py ❌ não necessário (Procfile usa uvicorn direto)"
+      ],
+      "dashboard": ["app.py ⚠️ camada NWP nova, mas ainda acoplado ao DuckDB (Etapa 1.4)"],
+      "processors": ["rain_accumulator.py ⚠️ ainda DuckDB (adaptar em etapa futura)"],
+      "models": ["lstm_river.py ❌ Fase 2"],
+      "alerts": ["telegram_bot.py ✅ existente (DuckDB legado); telegram_alert.py/webhook_dispatcher.py ❌ Fase 2"]
+    },
+    "cloudflare": [
+      "ana_proxy_worker.js ✅ deployado",
+      "DEPLOY_WORKER.md ✅ guia completo"
+    ],
+    "raiz": [
+      "wrangler.toml ✅",
+      "Procfile ✅",
+      ".env ✅ completo (com CF_WORKER_URL)",
+      "requirements.txt ✅ (psycopg2-binary, boto3, pyarrow, niquests pinado; duckdb mantido até Fase 2)"
+    ],
+    "github_workflows": [
+      "collect_realtime.yml ✅ híbrido, zero commits de dados, .netrc NASA, alerts slim 5min"
+    ]
+  },
+  "commits_chave_implementacao": [
+    "7ed92ff — arquitetura híbrida Supabase+R2 (Etapas 1.2+1.3 base)",
+    "dd42dfe, d43a795, 840acf5, 870a7e1, 2cd3f08 — correções pós-produção (alertas, NASA, upserts, retry ANA)",
+    "23f6113 — noaa→HybridWriter + NWP no mapa",
+    "06e4948 — API v3 + Procfile",
+    "b7ee75f — Cloudflare Worker versionado"
+  ]
+}
