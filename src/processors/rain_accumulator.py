@@ -458,9 +458,21 @@ def export_accumulated_parquet(
         OSError: Se não for possível criar o diretório de saída.
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    df: pd.DataFrame = db._con.execute(
-        "SELECT * FROM rain_accumulated ORDER BY station_id, date"
-    ).df()
+    df: pd.DataFrame = db._con.execute("""
+        SELECT ra.station_id, ra.date,
+               ra.rain_1h, ra.rain_3h, ra.rain_6h, ra.rain_12h,
+               ra.rain_24h, ra.rain_48h, ra.rain_72h, ra.rain_7d,
+               ra.updated_at,
+               s.lat, s.lon,
+               s.name AS station_name,
+               s.municipality,
+               s.river
+        FROM   rain_accumulated ra
+        LEFT JOIN stations s ON s.station_id = ra.station_id
+        ORDER  BY ra.station_id, ra.date
+    """).df()
+    # lat=0.0 são stubs ANA sem coordenada real — substituir por NaN
+    df.loc[df["lat"] == 0.0, ["lat", "lon"]] = None
     df.to_parquet(output_path, index=False, engine="pyarrow")
     logger.info(f"accumulated_rain.parquet exportado: {output_path} ({len(df)} linhas)")
     return len(df)

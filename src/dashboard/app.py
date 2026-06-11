@@ -851,9 +851,10 @@ def _build_map(stations_df: pd.DataFrame,
                period: str = "rain_24h",
                gpm_df: Optional[pd.DataFrame] = None,
                inmet_df: Optional[pd.DataFrame] = None,
-               show_layers: Optional[dict] = None) -> Optional["folium.Map"]:
+               show_layers: Optional[dict] = None,
+               nwp_df: Optional[pd.DataFrame] = None) -> Optional["folium.Map"]:
     """
-    Mapa Folium estilo Windy: HeatMap GPM + círculos INMET + marcadores de rios.
+    Mapa Folium estilo Windy: HeatMap GPM + círculos INMET + marcadores de rios + previsão NWP.
 
     Args:
         stations_df: DataFrame de estações (com lat/lon/source).
@@ -862,7 +863,9 @@ def _build_map(stations_df: pd.DataFrame,
         period: Coluna de acumulado a exibir (ex: "rain_24h").
         gpm_df: DataFrame GPM/CHIRPS com lat, lon, precip_mm (17k+ pontos RS).
         show_layers: Dict com booleanos para cada camada:
-            {"heatmap": True, "inmet": True, "rios": True, "nwp": False}
+            {"heatmap": True, "inmet": True, "rios": True, "nwp": True}
+        nwp_df: DataFrame de load_all_forecasts_summary() com previsão 7 dias
+            (location_name, lat, lon, rain_6h, rain_24h, rain_48h, temp_mean, cape_max).
 
     Returns:
         Objeto folium.Map ou None se folium não estiver disponível.
@@ -1159,6 +1162,73 @@ def _build_map(stations_df: pd.DataFrame,
                 ).add_to(inmet_layer)
     inmet_layer.add_to(m)
 
+    # ── Camada NWP — previsão 7 dias (10 pontos RS) ─────────────────────────
+    nwp_layer = folium.FeatureGroup(
+        name="🌤️ Previsão NWP (7 dias)", show=layers.get("nwp", True)
+    )
+    if nwp_df is not None and not nwp_df.empty:
+        for _, row in nwp_df.iterrows():
+            if pd.isna(row.get("lat")) or pd.isna(row.get("lon")):
+                continue
+            rain24 = _safe_float(row.get("rain_24h"))
+            rain48 = _safe_float(row.get("rain_48h"))
+            rain6  = _safe_float(row.get("rain_6h"))
+            temp   = row.get("temp_mean")
+            cape   = row.get("cape_max")
+            color  = _rain_color_windy(rain24) if rain24 > 0 else "#0ea5e9"
+            name   = str(row.get("location_name", ""))
+
+            popup_rows = (
+                f"<tr><td style='color:#94a3b8;padding:2px 6px 2px 0'>Chuva 6h</td>"
+                f"    <td style='text-align:right;color:#38bdf8;padding:2px 0'><b>{rain6:.1f} mm</b></td></tr>"
+                f"<tr><td style='color:#94a3b8;padding:2px 6px 2px 0'>Chuva 24h</td>"
+                f"    <td style='text-align:right;color:#38bdf8;padding:2px 0'><b>{rain24:.1f} mm</b></td></tr>"
+                f"<tr><td style='color:#94a3b8;padding:2px 6px 2px 0'>Chuva 48h</td>"
+                f"    <td style='text-align:right;color:#38bdf8;padding:2px 0'><b>{rain48:.1f} mm</b></td></tr>"
+            )
+            if temp is not None and not pd.isna(temp):
+                popup_rows += (
+                    f"<tr><td style='color:#94a3b8;padding:2px 6px 2px 0'>Temp. 24h</td>"
+                    f"    <td style='text-align:right;color:#fbbf24;padding:2px 0'><b>{float(temp):.1f}°C</b></td></tr>"
+                )
+            if cape is not None and not pd.isna(cape):
+                popup_rows += (
+                    f"<tr><td style='color:#94a3b8;padding:2px 6px 2px 0'>CAPE máx</td>"
+                    f"    <td style='text-align:right;color:#f87171;padding:2px 0'><b>{float(cape):.0f} J/kg</b></td></tr>"
+                )
+            popup_html = (
+                f"<div style='font-family:sans-serif;background:#1e293b;color:#e2e8f0;"
+                f"border-radius:8px;padding:12px;min-width:180px;font-size:13px'>"
+                f"<b style='font-size:15px;color:#7dd3fc'>🌤️ {name}</b>"
+                f"<span style='font-size:10px;color:#64748b'> · Previsão NWP</span><br>"
+                f"<hr style='border-color:#334155;margin:6px 0'>"
+                f"<table style='width:100%;border-collapse:collapse'>"
+                f"{popup_rows}"
+                f"</table></div>"
+            )
+            rain_str = f"{rain24:.1f} mm/24h" if rain24 > 0 else "sem chuva"
+            # Marcador losango via DivIcon para distinguir de estações reais
+            folium.Marker(
+                location=[float(row["lat"]), float(row["lon"])],
+                icon=folium.DivIcon(
+                    html=(
+                        f"<div style='"
+                        f"width:22px;height:22px;"
+                        f"background:{color};opacity:0.85;"
+                        f"transform:rotate(45deg);"
+                        f"border:2px solid #7dd3fc;"
+                        f"border-radius:3px;"
+                        f"margin-top:-11px;margin-left:-11px"
+                        f"'></div>"
+                    ),
+                    icon_size=(22, 22),
+                    icon_anchor=(11, 11),
+                ),
+                popup=folium.Popup(popup_html, max_width=220),
+                tooltip=f"🌤️ {name}: {rain_str}",
+            ).add_to(nwp_layer)
+    nwp_layer.add_to(m)
+
     folium.LayerControl(collapsed=False).add_to(m)
     return m
 
@@ -1349,11 +1419,12 @@ def _page_overview(river_status_df: pd.DataFrame,
         show_heatmap  = st.checkbox("🛰️ GPM/CHIRPS",  value=True)
 
     # inmet_pts controlado pelo LayerControl do mapa Folium (não duplicar aqui)
-    show_layers = {"heatmap": show_heatmap, "inmet_pts": False, "rios": True}
+    show_layers = {"heatmap": show_heatmap, "inmet_pts": False, "rios": True, "nwp": True}
 
-    # ── Dados satélite / INMET ─────────────────────────────────────────────
+    # ── Dados satélite / INMET / NWP ──────────────────────────────────────
     gpm_df   = load_gpm_precip()
     inmet_df = load_inmet_latest()
+    nwp_summary_df = load_all_forecasts_summary()
 
     # ── Layout principal REDEMET: mapa (70%) | painel (30%) ───────────────
     col_map, col_panel = st.columns([7, 3])
@@ -1367,6 +1438,7 @@ def _page_overview(river_status_df: pd.DataFrame,
                 gpm_df=gpm_df if not gpm_df.empty else None,
                 inmet_df=inmet_df if not inmet_df.empty else None,
                 show_layers=show_layers,
+                nwp_df=nwp_summary_df if not nwp_summary_df.empty else None,
             )
             if m is not None:
                 st_folium(m, use_container_width=True, height=580, returned_objects=[])

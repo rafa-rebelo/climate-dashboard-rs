@@ -10,7 +10,7 @@ from __future__ import annotations
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import niquests
 import numpy as np
@@ -31,7 +31,13 @@ _SRC_DIR = Path(__file__).resolve().parents[2]
 if str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR / "src"))
 
-from database.db_manager import ClimateDB  # noqa: E402
+try:
+    from database.hybrid_writer import HybridWriter
+    _HW_OK = True
+except ImportError:
+    HybridWriter = None   # type: ignore[assignment,misc]
+    _HW_OK = False
+    logger.warning("HybridWriter não disponível — noaa_collector sem persistência híbrida.")
 
 # ---------------------------------------------------------------------------
 # Constantes
@@ -174,7 +180,7 @@ def _parse_hourly(response: Any, point_name: str, lat: float, lon: float) -> pd.
         lon: Longitude do ponto.
 
     Returns:
-        DataFrame com colunas compatíveis com ClimateDB.upsert_forecasts().
+        DataFrame com colunas compatíveis com HybridWriter.write_forecasts().
     """
     h = response.Hourly()
     times = pd.date_range(
@@ -250,24 +256,22 @@ def _parse_daily(response: Any, point_name: str, lat: float, lon: float) -> pd.D
 # Orquestrador principal
 # ---------------------------------------------------------------------------
 
-def collect_nwp_forecasts(db: ClimateDB | None = None) -> dict[str, Any]:
+def collect_nwp_forecasts(db: Optional[Any] = None) -> dict[str, Any]:
     """Coleta previsões NWP para todos os pontos de grade do RS.
 
     Fluxo:
     1. Carrega pontos de grade do config.yaml
     2. Faz requisição única à Open-Meteo com retry exponencial
     3. Parseia respostas em DataFrames horário e diário
-    4. Salva hourly em data/forecasts/nwp_7days.parquet
-    5. Salva daily em data/forecasts/nwp_7days_daily.parquet
-    6. Faz upsert no DuckDB via ClimateDB (tabela forecasts)
+    4. Persiste via HybridWriter (Fluxo A: Supabase PG, Fluxo B: Cloudflare R2)
 
     Args:
-        db: Instância de ClimateDB. Se None, cria uma conexão temporária.
+        db: Ignorado — mantido apenas para compatibilidade com chamadores antigos.
 
     Returns:
         Dicionário com chaves: points_collected (int), hourly_rows (int),
-        daily_rows (int), parquet_hourly (str), parquet_daily (str),
-        duration_s (float).
+        daily_rows (int), pg_rows (int), pg_ok (bool), r2_ok (bool),
+        r2_key (str), duration_s (float).
 
     Raises:
         FileNotFoundError: Se config.yaml não for encontrado.
@@ -326,29 +330,16 @@ def collect_nwp_forecasts(db: ClimateDB | None = None) -> dict[str, Any]:
     df_hourly = pd.concat(hourly_frames, ignore_index=True)
     df_daily  = pd.concat(daily_frames,  ignore_index=True)
 
-    # Persistência em Parquet
-    df_hourly.to_parquet(path_hourly, index=False, engine="pyarrow")
-    df_daily.to_parquet(path_daily,   index=False, engine="pyarrow")
-    logger.info(f"Parquet hourly salvo: {path_hourly} ({len(df_hourly)} linhas)")
-    logger.info(f"Parquet daily  salvo: {path_daily} ({len(df_daily)} linhas)")
-
-    # Upsert no DuckDB — apenas colunas que a tabela forecasts espera
-    db_cols = [
-        "location_name", "lat", "lon", "forecast_ts", "valid_ts",
-        "rain_mm", "temperature", "wind_speed", "cape_j_kg",
-        "lifted_index", "k_index", "model_source",
-    ]
-    df_for_db = df_hourly[db_cols].copy()
-
-    _owns_db = db is None
-    if _owns_db:
-        db = ClimateDB()
-    try:
-        upserted = db.upsert_forecasts(df_for_db)
-        logger.info(f"DuckDB upsert: {upserted} previsões processadas.")
-    finally:
-        if _owns_db:
-            db.close()
+    # Persistência híbrida: Fluxo A (Supabase PG) + Fluxo B (Cloudflare R2)
+    pg_rows, pg_ok, r2_ok, r2_key = 0, False, False, ""
+    if _HW_OK:
+        writer = HybridWriter()
+        res = writer.write_forecasts(df_hourly, df_daily, path_hourly, path_daily)
+        pg_rows, pg_ok, r2_ok, r2_key = res.pg_rows, res.pg_ok, res.r2_ok, res.r2_key
+        if not res.success:
+            logger.error("write_forecasts: falha total (PG + R2). Verifique variáveis de ambiente.")
+    else:
+        logger.warning("HybridWriter indisponível — previsões não persistidas.")
 
     duration = (datetime.now(tz=timezone.utc) - t_start).total_seconds()
     logger.info(f"=== Coleta concluída em {duration:.1f}s ===")
@@ -357,8 +348,10 @@ def collect_nwp_forecasts(db: ClimateDB | None = None) -> dict[str, Any]:
         "points_collected": len(responses),
         "hourly_rows":      len(df_hourly),
         "daily_rows":       len(df_daily),
-        "parquet_hourly":   str(path_hourly),
-        "parquet_daily":    str(path_daily),
+        "pg_rows":          pg_rows,
+        "pg_ok":            pg_ok,
+        "r2_ok":            r2_ok,
+        "r2_key":           r2_key,
         "duration_s":       round(duration, 2),
     }
 
