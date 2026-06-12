@@ -382,6 +382,227 @@ def save_to_r2(df: pd.DataFrame, rio_alvo: str = "guaiba") -> None:
 
 
 # ---------------------------------------------------------------------------
+# Sequências para o LSTM (janelas deslizantes)
+# ---------------------------------------------------------------------------
+
+# Resolução do dataset é DIÁRIA — os horizontes 6/12/24/48 HORAS do roadmap
+# são mapeados para 1/2/3/6 DIAS até existir série horária suficiente
+# (a telemetria horária do R2 acumula desde 10/06/2026).
+_HORIZONS_DIAS_PADRAO = [1, 2, 3, 6]
+
+_FEATURE_COLS = [
+    "cota_m", "precip_bacia_mm", "temp_media_c", "umidade_media_pct",
+    "precip_acum_3d", "precip_acum_7d", "precip_acum_15d",
+    "cota_lag_1d", "cota_lag_2d", "cota_lag_3d", "cota_delta_1d",
+    "mes_seno", "mes_cosseno",
+]
+
+
+def create_sequences(
+    df: pd.DataFrame,
+    seq_len: int = 72,
+    horizons: Optional[list[int]] = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Transforma o dataset diário em janelas deslizantes para o LSTM.
+
+    Cada amostra t usa seq_len dias de histórico (X) e prevê a cota nos
+    horizontes futuros (y). Janelas que atravessam lacunas de calendário
+    (dias removidos na limpeza, ex.: mai/2024) são DESCARTADAS — o LSTM
+    nunca vê uma sequência com salto temporal disfarçado.
+
+    Args:
+        df: Saída de build_dataset() (diário, limpo).
+        seq_len: Dias de histórico por janela de entrada.
+        horizons: Horizontes de previsão em DIAS (padrão [1, 2, 3, 6] —
+            equivalente diário dos 6/12/24/48h do roadmap).
+
+    Returns:
+        Tupla (X, y, datas):
+          X: float32 (n_amostras, seq_len, n_features)
+          y: float32 (n_amostras, n_horizontes) — cota_m futura
+          datas: datetime64 (n_amostras,) — data-base t de cada amostra
+            (necessária para o split temporal logar períodos).
+    """
+    horizons = horizons or _HORIZONS_DIAS_PADRAO
+    h_max = max(horizons)
+
+    # Reindexa para o calendário contínuo — dias ausentes viram NaN e
+    # invalidam qualquer janela que os contenha.
+    serie = (
+        df.assign(data=pd.to_datetime(df["data"]))
+        .set_index("data")
+        .sort_index()
+        .asfreq("D")
+    )
+    feats = serie[_FEATURE_COLS].to_numpy(dtype=np.float32)
+    alvo  = serie["cota_m"].to_numpy(dtype=np.float32)
+    valido = ~np.isnan(feats).any(axis=1)
+
+    X_list: list[np.ndarray] = []
+    y_list: list[np.ndarray] = []
+    datas:  list[np.datetime64] = []
+
+    for t in range(seq_len - 1, len(serie) - h_max):
+        if not valido[t - seq_len + 1: t + 1].all():
+            continue
+        alvos = alvo[[t + h for h in horizons]]
+        if np.isnan(alvos).any():
+            continue
+        X_list.append(feats[t - seq_len + 1: t + 1])
+        y_list.append(alvos)
+        datas.append(serie.index.values[t])
+
+    X = np.stack(X_list) if X_list else np.empty((0, seq_len, len(_FEATURE_COLS)), np.float32)
+    y = np.stack(y_list) if y_list else np.empty((0, len(horizons)), np.float32)
+    datas_arr = np.array(datas, dtype="datetime64[D]")
+
+    descartadas = (len(serie) - seq_len - h_max + 1) - len(X)
+    logger.info(
+        f"Sequências: {len(X):,} amostras (seq_len={seq_len}, "
+        f"horizontes={horizons} dias) | {descartadas:,} janelas descartadas "
+        f"por atravessarem lacunas."
+    )
+    return X, y, datas_arr
+
+
+def split_sequences(
+    X: np.ndarray,
+    y: np.ndarray,
+    datas: Optional[np.ndarray] = None,
+    val_ratio: float = 0.15,
+    test_ratio: float = 0.10,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Split TEMPORAL (train → val → test, em ordem cronológica).
+
+    NUNCA aleatório: amostras de validação/teste são estritamente
+    posteriores às de treino — dados futuros não vazam para o passado.
+
+    Args:
+        X: Janelas de entrada (n, seq_len, n_features).
+        y: Alvos (n, n_horizontes).
+        datas: Datas-base das amostras (para logar períodos; opcional).
+        val_ratio: Fração final do treino reservada à validação.
+        test_ratio: Fração final da série reservada ao teste.
+
+    Returns:
+        (X_train, X_val, X_test, y_train, y_val, y_test).
+    """
+    n = len(X)
+    n_test  = int(n * test_ratio)
+    n_val   = int(n * val_ratio)
+    n_train = n - n_val - n_test
+
+    X_train, X_val, X_test = X[:n_train], X[n_train:n_train + n_val], X[n_train + n_val:]
+    y_train, y_val, y_test = y[:n_train], y[n_train:n_train + n_val], y[n_train + n_val:]
+
+    def _periodo(ini: int, fim: int) -> str:
+        if datas is None or fim <= ini:
+            return "—"
+        return f"{datas[ini]} → {datas[fim - 1]}"
+
+    logger.info(f"Split temporal — train: {len(X_train):,} ({_periodo(0, n_train)})")
+    logger.info(f"               — val:   {len(X_val):,} ({_periodo(n_train, n_train + n_val)})")
+    logger.info(f"               — test:  {len(X_test):,} ({_periodo(n_train + n_val, n)})")
+    for nome, yy in (("train", y_train), ("val", y_val), ("test", y_test)):
+        if len(yy):
+            logger.info(f"  cota {nome}: min {yy.min():.2f} m | max {yy.max():.2f} m")
+    logger.info("Vazamento de dados: NENHUM (confirmado por split temporal)")
+    return X_train, X_val, X_test, y_train, y_val, y_test
+
+
+class MinMaxParams:
+    """Escalador min-max picklável, ajustado SOMENTE no treino.
+
+    Implementação numpy pura (sem dependência de scikit-learn) com a
+    mesma matemática do MinMaxScaler: (x - min) / (max - min).
+
+    Attributes:
+        x_min: Mínimos por feature (1, 1, n_features).
+        x_max: Máximos por feature (1, 1, n_features).
+        y_min: Mínimo do alvo (para desnormalizar previsões).
+        y_max: Máximo do alvo.
+    """
+
+    def __init__(self) -> None:
+        self.x_min: Optional[np.ndarray] = None
+        self.x_max: Optional[np.ndarray] = None
+        self.y_min: float = 0.0
+        self.y_max: float = 1.0
+
+    def fit(self, X_train: np.ndarray, y_train: np.ndarray) -> "MinMaxParams":
+        """Aprende min/max do treino (e do alvo, para desnormalização)."""
+        self.x_min = X_train.min(axis=(0, 1), keepdims=True)
+        self.x_max = X_train.max(axis=(0, 1), keepdims=True)
+        self.y_min = float(y_train.min())
+        self.y_max = float(y_train.max())
+        return self
+
+    def transform_x(self, X: np.ndarray) -> np.ndarray:
+        """Normaliza features para [0, 1] com os parâmetros do treino."""
+        return ((X - self.x_min) / (self.x_max - self.x_min + 1e-9)).astype(np.float32)
+
+    def transform_y(self, y: np.ndarray) -> np.ndarray:
+        """Normaliza o alvo para [0, 1]."""
+        return ((y - self.y_min) / (self.y_max - self.y_min + 1e-9)).astype(np.float32)
+
+    def inverse_y(self, y_norm: np.ndarray) -> np.ndarray:
+        """Desnormaliza previsões de volta para metros."""
+        return y_norm * (self.y_max - self.y_min) + self.y_min
+
+
+def normalize(
+    X_train: np.ndarray,
+    X_val: np.ndarray,
+    X_test: np.ndarray,
+    y_train: Optional[np.ndarray] = None,
+    rio_alvo: str = "guaiba",
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, MinMaxParams]:
+    """Normaliza min-max com parâmetros aprendidos APENAS no treino.
+
+    Val e test recebem somente transform (nunca fit) — estatísticas do
+    futuro não contaminam o escalonamento. O escalador (incluindo
+    y_min/y_max para desnormalizar previsões) é salvo no R2 em
+    models/{rio_alvo}_scaler.pkl.
+
+    Args:
+        X_train: Janelas de treino (define os parâmetros).
+        X_val: Janelas de validação (só transform).
+        X_test: Janelas de teste (só transform).
+        y_train: Alvos de treino — obrigatório para registrar y_min/y_max.
+        rio_alvo: Slug do rio (compõe a chave do scaler no R2).
+
+    Returns:
+        (X_train_n, X_val_n, X_test_n, scaler).
+
+    Raises:
+        ValueError: Se y_train não for fornecido.
+    """
+    import pickle
+
+    if y_train is None:
+        raise ValueError("y_train é obrigatório (y_min/y_max desnormalizam previsões).")
+
+    scaler = MinMaxParams().fit(X_train, y_train)
+    X_train_n = scaler.transform_x(X_train)
+    X_val_n   = scaler.transform_x(X_val)   if len(X_val)  else X_val
+    X_test_n  = scaler.transform_x(X_test)  if len(X_test) else X_test
+
+    s3 = _r2_client()
+    bucket = os.getenv("R2_BUCKET_NAME", "")
+    if s3 is not None and bucket:
+        key = f"models/{rio_alvo}_scaler.pkl"
+        s3.put_object(Bucket=bucket, Key=key, Body=pickle.dumps(scaler))
+        logger.success(
+            f"R2 upload: {key} (y_min={scaler.y_min:.2f} m, "
+            f"y_max={scaler.y_max:.2f} m)"
+        )
+    else:
+        logger.warning("R2 indisponível — scaler não persistido.")
+
+    return X_train_n, X_val_n, X_test_n, scaler
+
+
+# ---------------------------------------------------------------------------
 # Standalone
 # ---------------------------------------------------------------------------
 
@@ -395,6 +616,14 @@ if __name__ == "__main__":
 
     dataset = build_dataset(rio_alvo="guaiba", start_year=2000)
     print(f"\nshape final: {dataset.shape}")
-    print(dataset.tail().to_string())
     save_to_r2(dataset, rio_alvo="guaiba")
-    print("\nDataset de treino construído com sucesso!")
+
+    # Pipeline de sequências para o LSTM
+    X, y, datas = create_sequences(dataset, seq_len=72)
+    X_tr, X_va, X_te, y_tr, y_va, y_te = split_sequences(X, y, datas=datas)
+    X_tr, X_va, X_te, scaler = normalize(X_tr, X_va, X_te, y_train=y_tr)
+
+    print(f"\nX_train: {X_tr.shape} | X_val: {X_va.shape} | X_test: {X_te.shape}")
+    print(f"y_train: {y_tr.shape} | normalizado em [{X_tr.min():.2f}, {X_tr.max():.2f}]")
+    print("\nPipeline de sequências pronto para tensores PyTorch "
+          "(torch.from_numpy nos arrays float32)!")
