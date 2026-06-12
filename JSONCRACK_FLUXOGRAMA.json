@@ -1,175 +1,201 @@
 {
   "projeto": "Sistema Autônomo de Análise Climática RS",
-  "versao": "4.2",
-  "ultima_atualizacao": "2026-06-12 01:20 UTC",
-  "arquitetura": "Híbrida custo zero — Supabase PostgreSQL (quente) + Cloudflare R2 (fria) + CF Worker (proxy ANA) + GitHub Actions (orquestrador efêmero)",
+  "versao": "4.3",
+  "ultima_atualizacao": "2026-06-12 14:30 UTC",
+  "legenda_cores": {
+    "🟩": "CONCLUÍDO (verde claro)",
+    "🟨": "PENDENTE / EM ANDAMENTO (amarelo claro)",
+    "⏳": "NÃO EXECUTADO"
+  },
+  "arquitetura": "Híbrida custo zero — Supabase PostgreSQL (quente) + Cloudflare R2 (fria) + 2 CF Workers (proxy ANA + cron trigger) + GitHub Actions (executor efêmero)",
   "resumo_progresso": {
-    "fase_1_roadmap_v4": "70% — Etapas 1.1/1.2/1.3 concluídas · 1.4 e 1.5 pendentes",
-    "bloqueadores_criticos": "4/4 resolvidos em 11/06/2026",
-    "estabilizacao_24h": "🔄 em curso (monitor de lag ativo)"
+    "fase_1_roadmap_v4": "🟨 85% — 1.1/1.2/1.3 🟩 · estabilização 24h em curso · 1.4/1.5 ⏳",
+    "bloqueadores_criticos": "🟩 4/4 resolvidos (11/06)",
+    "cadencia_coleta": "🟩 10 min via Cloudflare Cron Trigger (39+ runs, zero falhas, ANA 100%)"
+  },
+  "variaveis_fornecidas": {
+    "🟩_ATIVAS_em_producao": {
+      "chuva_observada": "98 estações INMET — precip 1h/6h/24h + temperatura + umidade",
+      "chuva_satelite": "Grade GPM IMERG 5.600 pontos RS (~30 min delay)",
+      "acumulados": "1h/3h/6h/12h/24h/48h/72h/7d por estação",
+      "rios": "Nível + vazão + status NORMAL→EMERGENCIA + % cota — 5 rios (Guaíba, Jacuí, Taquari, Sinos, Camaquã)",
+      "previsao_7_dias": "10 cidades RS: precipitação, probabilidade, CAPE, Lifted Index, K-Index, nebulosidade, vento (vel+dir), temperatura, umidade, pressão, temp máx/mín diária",
+      "precipitacao_classificada": "Baixa/média/alta por limiares regionais do config.yaml + escala de intensidade",
+      "historico_bruto": "Parquets no R2 (particionamento por data) — leitura direta pandas/boto3"
+    },
+    "🟨_PENDENTES_estrutura_pronta": {
+      "api_publica": "FastAPI v3 com 6 endpoints pronta — falta deploy Render (Etapa 1.4a)",
+      "alertas_telegram": "Código migrado p/ Supabase — faltam secrets (última tarefa da etapa)",
+      "temperatura_agua": "Tabela water_quality.temperature_c criada — ANA sem medições no período",
+      "temperatura_noturna": "Derivável da série horária + temp_2m_min prevista — falta expor campo",
+      "radiacao_solar": "Open-Meteo oferece shortwave_radiation — adicionar ao coletor (~1h)"
+    },
+    "⏳_NAO_EXECUTADO": {
+      "balanco_hidrico": "P−ET0 viável (Open-Meteo tem et0_fao_evapotranspiration; ~3h) — forte p/ caso agro",
+      "nitrogenio": "Não se aplica — variável de solo, não climática; sistema fornece os insumos climáticos p/ modelos agronômicos",
+      "cemaden": "Pluviômetros de área de risco ~10min — backlog prioridade 1",
+      "goes16_radar_ml": "Satélite IR, radar REDEMET, LSTM (Fase 2)"
+    }
+  },
+  "integracao_api_python": {
+    "status": "🟨 pronta localmente — deploy Render pendente",
+    "como_consumir": "httpx.get(f'{API}/api/v3/rivers/status').json()",
+    "endpoints": [
+      "GET /health",
+      "GET /api/v3/rivers/status",
+      "GET /api/v3/weather/heatmap",
+      "GET /api/v3/stations/readings",
+      "GET /api/v3/analytics/history?days=30",
+      "GET /api/v3/forecasts/rivers"
+    ],
+    "alternativa_dados_brutos": "Parquets do R2 via boto3/pandas (egress zero)"
   },
   "fases": {
     "FASE_1_SETUP": {
-      "status": "✅ CONCLUÍDO",
+      "status": "🟩 CONCLUÍDO",
       "percentual": "100%",
       "etapas": {
-        "claude_code_vscode": "✅ Claude Code + memória project_climate_rs.md",
-        "projeto_criado": "✅ 01-Sistema-Autonomo_Analise-Climatica",
-        "venv_python": "✅ ativo",
-        "CLAUDE_md_5_agentes": "✅ 5 agentes + memória persistente",
-        "config_yaml": "✅ cotas RS + grade NWP + limiares",
-        "env_configurado": "✅ ANA + NASA + SUPABASE + R2 + CF_WORKER_URL"
+        "claude_code_vscode": "🟩 Claude Code + memória persistente",
+        "projeto_e_venv": "🟩 estrutura + venv ativo",
+        "CLAUDE_md_5_agentes": "🟩 5 agentes",
+        "config_yaml": "🟩 cotas RS + grade NWP + limiares",
+        "env_configurado": "🟩 ANA + SUPABASE + R2 + CF_WORKER_URL (NASA/TELEGRAM a repor no .env local)"
       }
     },
     "FASE_2_BANCO_DADOS": {
-      "status": "✅ MIGRADO PARA SUPABASE (11/06/2026)",
+      "status": "🟩 CONCLUÍDO — MIGRADO PARA SUPABASE+R2 (11/06)",
       "percentual": "100%",
-      "banco_quente": "Supabase PostgreSQL + PostGIS · pooler IPv4 · RLS off",
-      "banco_frio": "Cloudflare R2 · Parquet+Snappy · particionamento Hive por data",
-      "schema_versionado": "src/database/schema_supabase.sql (8 tabelas, idempotente)",
-      "dados_reais_12_06": {
-        "stations": "✅ 98 estações INMET",
-        "live_rain_readings": "✅ 98 (chuva/temp/umidade + acumulados 1h/6h/24h)",
-        "live_river_levels": "✅ 4 rios (nível + vazão + status + % cota)",
-        "live_gpm_precip": "✅ 5.600 pontos IMERG (grade CHIRPS removida)",
-        "forecasts": "✅ 1.680 previsões NWP (10 cidades × 168h)",
-        "water_quality": "✅ criada (ANA QA sem dados no período)",
-        "alerts_log": "✅ criada — histórico + throttle persistente 1h",
-        "river_ai_forecasts": "✅ criada — aguarda Fase 2 (LSTM)"
+      "banco_quente": "🟩 Supabase PostgreSQL + PostGIS (pooler IPv4)",
+      "banco_frio": "🟩 Cloudflare R2 — Parquet Hive por data",
+      "schema_versionado": "🟩 src/database/schema_supabase.sql (8 tabelas)",
+      "tabelas": {
+        "stations": "🟩 98 estações",
+        "live_rain_readings": "🟩 98 — chuva+temp+umidade+acumulados",
+        "live_river_levels": "🟩 5 rios — nível+vazão+status+%cota",
+        "live_gpm_precip": "🟩 5.600 pontos IMERG (CHIRPS removida)",
+        "forecasts": "🟩 1.680 previsões NWP",
+        "alerts_log": "🟩 criada — throttle persistente 1h",
+        "water_quality": "🟨 criada — aguarda dados ANA QA",
+        "river_ai_forecasts": "⏳ vazia — Fase 2 (LSTM)"
       },
-      "duckdb_legado": "⚠️ usado SOMENTE pelo dashboard local — eliminado do pipeline automatizado; remoção total na Etapa 1.4"
+      "duckdb_legado": "🟨 usado SÓ pelo dashboard local — remoção na Etapa 1.4"
     },
     "FASE_3_CADASTROS_APIS": {
-      "status": "✅ CONCLUÍDO (núcleo)",
+      "status": "🟩 NÚCLEO CONCLUÍDO",
       "percentual": "85%",
       "apis": {
-        "open_meteo": "✅ EM PRODUÇÃO · 1.680 previsões · 10 pontos RS",
-        "ana_hidroweb": "✅ EM PRODUÇÃO via Cloudflare Worker (417 intermitente mitigado com retry 5x)",
-        "inmet": "✅ EM PRODUÇÃO · ZIP público 30 dias (lag ~24h)",
-        "nasa_gpm_imerg": "✅ EM PRODUÇÃO · IMERG Early real (.netrc no runner)",
-        "chirps_v2": "✅ fallback automático do GPM",
-        "cemaden": "🆕 BACKLOG PRIORITÁRIO · pluviômetros de área de risco ~10min · dados abertos sem auth · ataca o lag do INMET",
-        "redemet": "⏳ BACKLOG · aguarda chave api.redemet.aer.mil.br",
-        "goes16": "⏳ BACKLOG · AWS Open Data",
-        "telegram_bot": "🟡 código pronto · faltam secrets (última tarefa da etapa)"
+        "open_meteo": "🟩 EM PRODUÇÃO — 1.680 previsões, 10 pontos",
+        "ana_hidroweb": "🟩 EM PRODUÇÃO via CF Worker (retry 417, 100% sucesso)",
+        "inmet": "🟩 EM PRODUÇÃO — ZIP 30 dias",
+        "nasa_gpm_imerg": "🟩 EM PRODUÇÃO — IMERG real (.netrc no runner)",
+        "chirps_v2": "🟩 fallback automático",
+        "cemaden": "⏳ BACKLOG prioridade 1",
+        "redemet": "⏳ BACKLOG — aguarda chave",
+        "telegram_bot": "🟨 código pronto — faltam secrets"
       }
     },
     "FASE_4_COLETORES": {
-      "status": "✅ CONCLUÍDO — todos no HybridWriter",
+      "status": "🟩 CONCLUÍDO — todos no HybridWriter",
       "percentual": "100%",
       "coletores": {
-        "ana_collector": "✅ Supabase+R2 · proxy CF Worker · retry 417 · estações Sinos renovadas (87382000 São Leopoldo, 87380000 Campo Bom, 87376000 Foz do Paranhana)",
-        "inmet_collector": "✅ Supabase+R2 · 98 estações · 44k+ leituras/ciclo",
-        "gpm_collector": "✅ Supabase+R2 · IMERG real · 5.600 pontos RS",
-        "noaa_collector": "✅ Supabase+R2 · 1.680 previsões NWP",
-        "cemaden_collector": "🆕 BACKLOG — próximo coletor (prioridade > GOES-16/REDEMET)",
-        "radar_collector": "⏳ BACKLOG — aguarda chave REDEMET"
+        "ana_collector": "🟩 Supabase+R2 · proxy CF · retry 417 · Sinos renovado (São Leopoldo/Campo Bom/Paranhana)",
+        "inmet_collector": "🟩 Supabase+R2 · 98 estações",
+        "gpm_collector": "🟩 Supabase+R2 · IMERG real",
+        "noaa_collector": "🟩 Supabase+R2 · 11 vars horárias + 5 diárias",
+        "cemaden_collector": "⏳ backlog (próximo sprint)",
+        "radar_collector": "⏳ aguarda chave REDEMET"
       }
     },
     "FASE_5_PROCESSAMENTO": {
-      "status": "✅ CONCLUÍDO — migrado para arquitetura híbrida",
+      "status": "🟩 CONCLUÍDO — arquitetura híbrida",
       "percentual": "100%",
       "processadores": {
-        "rain_accumulator": "✅ v4 · série 30d do R2 → 8 janelas pandas → UPDATE Supabase (92 estações) — validado em produção",
-        "river_status": "✅ calculado pelo ana_collector (write_river_status) — NORMAL/ATENCAO/ALERTA/EMERGENCIA + % cota",
-        "spatial_interpolator": "⏳ BACKLOG — Kriging pykrige"
+        "rain_accumulator": "🟩 v4 — R2 → 8 janelas → Supabase (92 estações, validado em produção)",
+        "river_status": "🟩 no ana_collector (write_river_status)",
+        "spatial_interpolator": "⏳ Kriging pykrige"
       }
     },
     "FASE_6_DASHBOARD": {
-      "status": "🔄 FUNCIONAL LOCAL — desacoplamento é a Etapa 1.4",
+      "status": "🟨 FUNCIONAL LOCAL — dados defasados até Etapa 1.4",
       "percentual": "75%",
-      "paginas": "Visão Geral · Previsões · Rios · Chuva · Alertas · Sistema (+ camada NWP no mapa)",
-      "pendente_etapa_1_4": [
-        "Remover import duckdb e leituras locais",
-        "Consumir API v3 via @st.cache_data(ttl=600)",
-        "requirements_dashboard.txt enxuto",
-        "Deploy Streamlit Community Cloud"
-      ]
-    },
-    "FASE_7_GITHUB_ACTIONS": {
-      "status": "🟡 OPERACIONAL — cadência em estabilização",
-      "percentual": "90%",
-      "repositorio_ativo": "climate-dashboard-rs (privado) · 13 secrets · workflow híbrido",
-      "repositorio_legado": "climate-data-rs — ⚠️ DESATIVAR workflow antigo (tarefa do usuário)",
-      "workflow": {
-        "collect_realtime": "✅ ANA+INMET+GPM+NOAA+acumulados → Supabase+R2 · ZERO commits de dados",
-        "netrc_nasa": "✅ step cria ~/.netrc (GPM IMERG real)",
-        "alerts_job": "✅ verde · lista enxuta de pacotes · timeout 5min",
-        "cron": "🟡 GitHub degrada o agendamento (observado 2-4h em vez de 10min) · mudado para 7,27,47 · monitor de 24h decidirá",
-        "plano_b_cron": "Disparador externo gratuito (cron-job.org → POST workflow_dispatch com PAT) se a cadência não sustentar < 30min"
+      "url_local": "http://localhost:8501",
+      "paginas": "🟩 Visão Geral · Previsões · Rios · Chuva · Alertas · Sistema (+ camada NWP)",
+      "conformidade_visual": "🟩 tema Slate dark, rgba nos Plotly, mobile 768px, cache TTL, autorefresh",
+      "pendente_1_4": {
+        "desacoplar_duckdb": "🟨 remover import duckdb e consumir API v3",
+        "deploy_streamlit_cloud": "🟨 após desacoplamento"
       }
     },
+    "FASE_7_AUTOMACAO": {
+      "status": "🟩 CONCLUÍDO — autônomo na nuvem",
+      "percentual": "100%",
+      "repositorio_ativo": "🟩 climate-dashboard-rs (13 secrets, zero commits de dados)",
+      "repositorio_legado": "🟩 climate-data-rs — workflow DESATIVADO (12/06)",
+      "cron": "🟩 Cloudflare Cron Trigger */10 → workflow_dispatch (GitHub cron nativo abandonado por throttle)",
+      "evidencia": "🟩 39 runs 02:56–09:24 UTC · mediana 10 min · zero gaps>30min · ANA 100%",
+      "seguranca": "🟩 senha Supabase rotacionada · PAT escopo mínimo em secret CF"
+    },
     "FASE_8_MODELOS_ML": {
-      "status": "⏳ PENDENTE (Fase 2 do roadmap)",
+      "status": "⏳ PENDENTE (Fase 2)",
       "percentual": "0%",
-      "prerequisito": "30+ dias de histórico no R2 — acumulando desde 10/06 → destrava ~10/07/2026",
+      "prerequisito": "30+ dias de histórico R2 — acumulando desde 10/06 → destrava ~10/07/2026",
       "modelos": {
-        "lstm_rios": "⏳ Guaíba/Jacuí/Taquari/Sinos · 6h/12h/24h/48h · IC 95% → river_ai_forecasts",
-        "convlstm_nowcast": "⏳ aguarda radar REDEMET",
-        "drift_detector": "⏳ PENDENTE"
+        "lstm_rios": "⏳ Guaíba/Jacuí/Taquari/Sinos · 6-48h · IC 95%",
+        "convlstm_nowcast": "⏳ aguarda radar",
+        "drift_detector": "⏳"
       }
     },
     "FASE_9_API_REST": {
-      "status": "✅ CÓDIGO PRONTO — deploy pendente",
+      "status": "🟨 CÓDIGO PRONTO — deploy pendente",
       "percentual": "80%",
-      "arquivo": "src/api/main.py (v3 · Supabase+R2)",
-      "endpoints": [
-        "GET /health (ping Supabase+R2 + latência)",
-        "GET /api/v3/rivers/status (cache 5min · cores rgba)",
-        "GET /api/v3/weather/heatmap (GZip · grade IMERG)",
-        "GET /api/v3/stations/readings (JOIN stations)",
-        "GET /api/v3/analytics/history (Parquets R2 · days 1-90)",
-        "GET /api/v3/forecasts/rivers (placeholder Fase 2)"
-      ],
-      "deploy": "⏳ Render Free Tier — Procfile pronto na raiz (Etapa 1.4a)"
+      "endpoints": "🟩 6 implementados e testados local",
+      "procfile": "🟩 pronto",
+      "deploy_render": "🟨 Etapa 1.4a"
     },
     "FASE_10_ALERTAS": {
-      "status": "🟡 CÓDIGO PRONTO — aguarda secrets",
+      "status": "🟨 CÓDIGO PRONTO — aguarda secrets",
       "percentual": "85%",
-      "telegram_bot": "✅ migrado para Supabase · dispara só ALERTA/EMERGENCIA · throttle 1h persistente em alerts_log · comandos /status e /ping",
-      "pendente": "Secrets TELEGRAM_TOKEN + TELEGRAM_CHAT_ID no repo (decisão: última tarefa da etapa)",
-      "webhooks_b2b": "⏳ Fase 2 (base pronta: alerts_log)"
+      "telegram_bot": "🟩 migrado p/ Supabase · só ALERTA/EMERGENCIA · throttle 1h persistente · /status /ping",
+      "secrets": "🟨 TELEGRAM_TOKEN/CHAT_ID (última tarefa da etapa — recuperar no @BotFather)",
+      "webhooks_b2b": "⏳ Fase 2"
     },
     "FASE_11_TESTES_DEPLOY": {
-      "status": "🔄 ESTABILIZAÇÃO EM CURSO",
-      "percentual": "40%",
-      "monitor": "scripts/stability_monitor.py → data/stability_log.csv (amostras 15min)",
-      "criterios_etapa_1": [
-        "lag live_* < 30min por 24h — 🟡 medindo",
-        "taxa ANA > 80% — ✅ 100% em 7 runs (amostra 11/06)",
-        "Sinos atualizando — ⏳ aguarda 1º run pós-fix"
-      ]
+      "status": "🟨 ESTABILIZAÇÃO EM CURSO",
+      "percentual": "60%",
+      "criterios": {
+        "lag_30min_24h": "🟨 6h30+ cumpridas sem violação (lag real 0,7–8,7 min) — janela fecha ~03:00 UTC 13/06",
+        "taxa_ana_80": "🟩 100% em 39 runs",
+        "sinos_atualizando": "🟩 1,11 m com estações novas"
+      }
     }
   },
-  "dados_ao_vivo_ultimo_ciclo": {
-    "ciclo": "2026-06-11 23:13 UTC",
+  "dados_ao_vivo_12_06": {
     "status_rios": {
-      "Guaíba": "🟢 NORMAL · 1.29m / 3.0m (43%)",
-      "Jacuí": "🟢 NORMAL · 1.32m / 7.0m (19%) · vazão 26 m³/s",
-      "Taquari": "🟢 NORMAL · 1.03m / 5.0m (21%) · vazão 45 m³/s",
-      "Sinos": "⏳ aguardando 1º ciclo com estações novas"
+      "Guaíba": "🟢 NORMAL · 1.28m / 3.0m",
+      "Jacuí": "🟢 NORMAL · 0.68m / 7.0m",
+      "Taquari": "🟢 NORMAL · 1.60m / 5.0m",
+      "Sinos": "🟢 NORMAL · 1.11m / 4.5m (estações novas)",
+      "Camaquã": "🟢 NORMAL · 0.54m / 4.0m"
     },
+    "lag_pipeline": "0,7 a 8,7 min",
     "alertas_ativos": 0
   },
   "proximas_acoes": {
-    "1_AGORA": "Concluir estabilização 24h (monitor rodando) + decidir cron externo",
-    "2_USUARIO": "Desativar workflow do climate-data-rs · rotacionar senha Supabase · apagar SECRETS_PARA_COLAR.txt",
-    "3_ETAPA_1_4a": "Deploy API no Render (Procfile pronto)",
-    "4_ETAPA_1_4b": "Dashboard stateless consumindo a API",
-    "5_ULTIMA_DA_ETAPA": "Secrets TELEGRAM_TOKEN/CHAT_ID → ativar alertas",
-    "6_BACKLOG_PRIORITARIO": "cemaden_collector.py (chuva tempo real em áreas de risco)",
-    "7_FASE_2": "LSTM por rio (destrava ~10/07 com 30d de histórico R2)"
+    "1_AUTOMATICO": "🟨 Fechamento da janela 24h (~03:00 UTC 13/06) → declarar Etapa 1",
+    "2_USUARIO": "🟨 Secrets TELEGRAM (última da etapa) + repor NASA/TELEGRAM no .env local",
+    "3_ETAPA_1_4": "⏳ Deploy Render + dashboard stateless",
+    "4_SPRINT_EXPANSAO": "⏳ CEMADEN + 8 rios novos validados (Uruguai, Ibicuí, Sta Maria, Caí, Gravataí, Pelotas, Camaquã-Cristal, afluentes Sinos) + radiação solar + balanço hídrico (ET0)",
+    "5_ETAPA_1_5": "⏳ Demo comercial + carta de intenção (gatilho Fase 2)"
   },
   "notas_tecnicas": {
-    "pooler_supabase": "aws-1-sa-east-1.pooler.supabase.com — IPv4 obrigatório no Actions; CUIDADO com o hífen em sa-east-1 (typo causou 2 dias de falha silenciosa)",
-    "ana_417": "ANA devolve 417 intermitente para IPs Cloudflare — retry exponencial 5x no autenticar() resolve",
-    "upserts": "Todo ON CONFLICT DO UPDATE inclui updated_at=NOW(); live_river_levels deduplicada por rio_id (Postgres proíbe atualizar a mesma linha 2x no mesmo INSERT)",
-    "runner_efemero": "Throttle de alertas persistido em alerts_log — memória não sobrevive entre runs",
-    "niquests": "niquests==3.19.0 pinado — nunca requests.Session() (urllib3-future)",
-    "alerts_job_slim": "requirements completo puxa torch ~2GB e estoura timeout — job alerts instala 6 pacotes",
-    "progress_tracker_legado": "src/utils/progress_tracker.py (gerador deste JSON na v3) ainda é DuckDB — este arquivo agora é mantido manualmente até o tracker ser migrado"
+    "pooler_supabase": "aws-1-sa-east-1.pooler.supabase.com — IPv4; cuidado com o hífen",
+    "ana_417": "417 intermitente p/ IPs Cloudflare — retry 5x resolve",
+    "secret_cf_via_pipe": "PowerShell pipe anexa \\r ao stdin do wrangler secret put — usar bash printf",
+    "upserts": "Sempre updated_at=NOW(); live_river_levels deduplicada por rio_id",
+    "runner_efemero": "Estado persistente só no banco (ex.: throttle em alerts_log)",
+    "niquests": "niquests==3.19.0 pinado — nunca requests.Session()"
   },
   "custos": {
-    "TOTAL_MENSAL": "R$ 0,00 (Supabase Free + R2 Free + Workers Free + Actions Free)"
+    "TOTAL_MENSAL": "R$ 0,00"
   }
 }
