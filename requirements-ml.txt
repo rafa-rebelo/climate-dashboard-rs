@@ -1,0 +1,8 @@
+# Dependências exclusivas do pipeline de ML (treino local — Fase 2)
+# Não entram no requirements.txt para não inflar o job do GitHub Actions.
+# Instalar com: python -m pip install -r requirements-ml.txt
+
+google-cloud-bigquery==3.41.0
+db-dtypes==1.7.0
+# Acelera o download de resultados grandes (REST → Storage API):
+google-cloud-bigquery-storage>=2.24.0
