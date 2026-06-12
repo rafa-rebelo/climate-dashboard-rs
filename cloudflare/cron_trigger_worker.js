@@ -2,9 +2,9 @@
  * Cron Trigger — disparador externo do workflow de coleta
  *
  * O cron nativo do GitHub Actions é degradado em repos free (observado:
- * "*/10" executando a cada 2-4h, às vezes parando por horas). Este Worker
- * usa o Cron Trigger do Cloudflare (confiável, grátis) para disparar o
- * workflow_dispatch a cada 10 minutos via API do GitHub.
+ * agenda de 10 min executando a cada 2-4h, às vezes parando por horas).
+ * Este Worker usa o Cron Trigger do Cloudflare (confiável, grátis) para
+ * disparar o workflow_dispatch a cada 10 minutos via API do GitHub.
  *
  * Secret necessário (NUNCA hardcoded):
  *   GH_PAT — Fine-grained PAT com permissão Actions: Read and write
