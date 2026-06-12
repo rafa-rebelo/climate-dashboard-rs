@@ -1,0 +1,11 @@
+# Cloudflare Worker — disparador externo do cron de coleta
+# Deploy:  wrangler deploy -c wrangler.cron.toml
+# Secret:  wrangler secret put GH_PAT -c wrangler.cron.toml
+
+name = "climate-rs-cron"
+main = "cloudflare/cron_trigger_worker.js"
+compatibility_date = "2024-01-01"
+
+[triggers]
+# A cada 10 minutos — cron da Cloudflare é confiável (diferente do GitHub)
+crons = ["*/10 * * * *"]
