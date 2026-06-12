@@ -89,9 +89,34 @@
     ]
   },
   "tarefas_do_usuario_pendentes": [
-    "Criar secrets TELEGRAM_TOKEN e TELEGRAM_CHAT_ID no climate-dashboard-rs (ativa os alertas)",
     "Desativar workflow antigo no climate-data-rs (Actions → ⋯ → Disable workflow)",
-    "Rotacionar senha do Supabase + apagar SECRETS_PARA_COLAR.txt"
+    "Rotacionar senha do Supabase + apagar SECRETS_PARA_COLAR.txt",
+    "ÚLTIMA TAREFA DA ETAPA (decisão 12/06): criar secrets TELEGRAM_TOKEN e TELEGRAM_CHAT_ID → ativa os alertas"
+  ],
+  "backlog_novos_coletores": [
+    {
+      "prioridade": 1,
+      "fonte": "CEMADEN",
+      "arquivo": "src/collectors/cemaden_collector.py",
+      "valor": "Pluviômetros automáticos de áreas de risco (~10 min de cadência, dados abertos sem autenticação) — ataca a maior fraqueza atual: lag de ~24h do INMET. Cobertura densa exatamente nos municípios críticos (Vale do Taquari, Vale dos Sinos, Serra)",
+      "estimativa_horas": 4,
+      "destino": "live_rain_readings (Supabase) + historico/cemaden (R2) via HybridWriter",
+      "status": "🆕 aprovado em 12/06 — implementar após fechamento da Etapa 1"
+    },
+    {
+      "prioridade": 2,
+      "fonte": "GOES-16 (AWS Open Data)",
+      "valor": "Satélite infravermelho para o painel do dashboard",
+      "estimativa_horas": 4,
+      "status": "⏳ backlog"
+    },
+    {
+      "prioridade": 3,
+      "fonte": "REDEMET (radar Doppler)",
+      "valor": "Pré-requisito do nowcasting ConvLSTM (Fase 2)",
+      "bloqueio": "Aguarda chave de API",
+      "status": "⏳ backlog"
+    }
   ],
   "arquitetura_alvo": {
     "camada_quente": {

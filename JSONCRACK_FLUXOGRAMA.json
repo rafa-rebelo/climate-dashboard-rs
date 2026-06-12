@@ -1,13 +1,12 @@
 {
   "projeto": "Sistema Autônomo de Análise Climática RS",
-  "versao": "3.0",
-  "ultima_atualizacao": "2026-06-06 00:00 UTC",
+  "versao": "4.2",
+  "ultima_atualizacao": "2026-06-12 01:20 UTC",
+  "arquitetura": "Híbrida custo zero — Supabase PostgreSQL (quente) + Cloudflare R2 (fria) + CF Worker (proxy ANA) + GitHub Actions (orquestrador efêmero)",
   "resumo_progresso": {
-    "total_etapas": 47,
-    "concluidas": 30,
-    "em_progresso": 2,
-    "pendentes": 15,
-    "percentual": "64%"
+    "fase_1_roadmap_v4": "70% — Etapas 1.1/1.2/1.3 concluídas · 1.4 e 1.5 pendentes",
+    "bloqueadores_criticos": "4/4 resolvidos em 11/06/2026",
+    "estabilizacao_24h": "🔄 em curso (monitor de lag ativo)"
   },
   "fases": {
     "FASE_1_SETUP": {
@@ -15,308 +14,162 @@
       "percentual": "100%",
       "etapas": {
         "claude_code_vscode": "✅ Claude Code + memória project_climate_rs.md",
-        "extensoes_vscode": "✅ Python · Pylance · GitLens · Thunder Client",
         "projeto_criado": "✅ 01-Sistema-Autonomo_Analise-Climatica",
-        "venv_python311": "✅ (.venv) ativo",
-        "estrutura_pastas": "✅ 18 pastas criadas",
-        "init_py": "✅ 12 arquivos __init__.py",
+        "venv_python": "✅ ativo",
         "CLAUDE_md_5_agentes": "✅ 5 agentes + memória persistente",
-        "requirements_instalados": "✅ DuckDB 1.5.3 · Streamlit 1.58 · FastAPI 0.136",
         "config_yaml": "✅ cotas RS + grade NWP + limiares",
-        "env_configurado": "✅ ANA_IDENTIFICADOR + ANA_SENHA via HEADER"
+        "env_configurado": "✅ ANA + NASA + SUPABASE + R2 + CF_WORKER_URL"
       }
     },
     "FASE_2_BANCO_DADOS": {
-      "status": "✅ CONCLUÍDO",
+      "status": "✅ MIGRADO PARA SUPABASE (11/06/2026)",
       "percentual": "100%",
-      "banco": "data/climate.duckdb · 5.8 MB · Online",
-      "dados_reais": {
-        "estacoes_ativas": 102,
-        "leituras_chuva": 1144,
-        "niveis_rios": 1171,
-        "previsoes_nwp": 1680,
-        "alertas_emitidos": 0
+      "banco_quente": "Supabase PostgreSQL + PostGIS · pooler IPv4 · RLS off",
+      "banco_frio": "Cloudflare R2 · Parquet+Snappy · particionamento Hive por data",
+      "schema_versionado": "src/database/schema_supabase.sql (8 tabelas, idempotente)",
+      "dados_reais_12_06": {
+        "stations": "✅ 98 estações INMET",
+        "live_rain_readings": "✅ 98 (chuva/temp/umidade + acumulados 1h/6h/24h)",
+        "live_river_levels": "✅ 4 rios (nível + vazão + status + % cota)",
+        "live_gpm_precip": "✅ 5.600 pontos IMERG (grade CHIRPS removida)",
+        "forecasts": "✅ 1.680 previsões NWP (10 cidades × 168h)",
+        "water_quality": "✅ criada (ANA QA sem dados no período)",
+        "alerts_log": "✅ criada — histórico + throttle persistente 1h",
+        "river_ai_forecasts": "✅ criada — aguarda Fase 2 (LSTM)"
       },
-      "tabelas": {
-        "stations": "✅ 102 estações ativas",
-        "rain_readings": "✅ 1.144 leituras",
-        "rain_accumulated": "✅ acumulados calculados",
-        "forecasts": "✅ 1.680 previsões NOAA/GFS",
-        "alerts_log": "✅ criada — 0 alertas ativos",
-        "model_metrics": "✅ criada",
-        "river_levels": "✅ 1.171 registros ANA",
-        "water_quality": "✅ criada",
-        "river_status": "✅ 4 rios monitorados",
-        "river_ai_forecasts": "✅ criada",
-        "wrf_hydro_results": "✅ criada",
-        "gpm_precip": "✅ 17.723 pontos RS · lat/lon/precip_mm/timestamp/source"
-      }
+      "duckdb_legado": "⚠️ usado SOMENTE pelo dashboard local — eliminado do pipeline automatizado; remoção total na Etapa 1.4"
     },
     "FASE_3_CADASTROS_APIS": {
-      "status": "🔄 EM PROGRESSO",
-      "percentual": "50%",
+      "status": "✅ CONCLUÍDO (núcleo)",
+      "percentual": "85%",
       "apis": {
         "open_meteo": "✅ EM PRODUÇÃO · 1.680 previsões · 10 pontos RS",
-        "ana_hidroweb": "✅ EM PRODUÇÃO · 1.171 registros rios · 102 estações",
-        "inmet": "✅ EM PRODUÇÃO · ZIP público · histórico 30 dias · sem geo-restrição",
-        "chirps_v2": "✅ EM PRODUÇÃO · fallback GPM · 17.723 pontos RS · sem auth",
-        "nasa_gpm_imerg": "⏳ PENDENTE · aguarda NASA_USER/NASA_PASS em GitHub Secrets",
-        "redemet": "⏳ PENDENTE · api.redemet.aer.mil.br",
-        "telegram_bot": "⏳ PENDENTE · @BotFather"
+        "ana_hidroweb": "✅ EM PRODUÇÃO via Cloudflare Worker (417 intermitente mitigado com retry 5x)",
+        "inmet": "✅ EM PRODUÇÃO · ZIP público 30 dias (lag ~24h)",
+        "nasa_gpm_imerg": "✅ EM PRODUÇÃO · IMERG Early real (.netrc no runner)",
+        "chirps_v2": "✅ fallback automático do GPM",
+        "cemaden": "🆕 BACKLOG PRIORITÁRIO · pluviômetros de área de risco ~10min · dados abertos sem auth · ataca o lag do INMET",
+        "redemet": "⏳ BACKLOG · aguarda chave api.redemet.aer.mil.br",
+        "goes16": "⏳ BACKLOG · AWS Open Data",
+        "telegram_bot": "🟡 código pronto · faltam secrets (última tarefa da etapa)"
       }
     },
     "FASE_4_COLETORES": {
-      "status": "✅ CONCLUÍDO (parcial)",
-      "percentual": "71%",
+      "status": "✅ CONCLUÍDO — todos no HybridWriter",
+      "percentual": "100%",
       "coletores": {
-        "noaa_collector": {
-          "status": "✅ EM PRODUÇÃO",
-          "resultado": "1.680 previsões · 10 cidades RS · 7 dias · 1.7s"
-        },
-        "ana_collector": {
-          "status": "✅ EM PRODUÇÃO",
-          "resultado": "1.171 registros rios · 102 estações · 4 rios monitorados",
-          "endpoints": "23 endpoints Swagger v1.0.3984.2",
-          "descobertas": "HEADER auth · tokenautenticacao · cotas em cm÷100"
-        },
-        "inmet_collector": {
-          "status": "✅ EM PRODUÇÃO",
-          "resultado": "ZIP público histórico · inmet_historico_rs.parquet · inmet_stations_rs.parquet",
-          "modo": "--mode=historico --dias=30"
-        },
-        "gpm_collector": {
-          "status": "✅ EM PRODUÇÃO",
-          "arquivo": "src/collectors/gpm_collector.py",
-          "fonte_primaria": "NASA GPM IMERG Early (CMR + Earthdata auth — aguarda NASA_USER/NASA_PASS)",
-          "fonte_fallback": "CHIRPS v2.0 global daily GeoTIFF.gz · público · 37 dias lag",
-          "resultado": "17.723 pontos RS · 6 KB · gpm_precip_1d.parquet",
-          "processamento": "rasterio MemoryFile · RS bbox clip · DuckDB upsert"
-        },
-        "radar_collector": "⏳ PENDENTE — aguarda chave REDEMET",
-        "water_quality_collector": "✅ INTEGRADO no ana_collector.py"
+        "ana_collector": "✅ Supabase+R2 · proxy CF Worker · retry 417 · estações Sinos renovadas (87382000 São Leopoldo, 87380000 Campo Bom, 87376000 Foz do Paranhana)",
+        "inmet_collector": "✅ Supabase+R2 · 98 estações · 44k+ leituras/ciclo",
+        "gpm_collector": "✅ Supabase+R2 · IMERG real · 5.600 pontos RS",
+        "noaa_collector": "✅ Supabase+R2 · 1.680 previsões NWP",
+        "cemaden_collector": "🆕 BACKLOG — próximo coletor (prioridade > GOES-16/REDEMET)",
+        "radar_collector": "⏳ BACKLOG — aguarda chave REDEMET"
       }
     },
     "FASE_5_PROCESSAMENTO": {
-      "status": "✅ CONCLUÍDO",
+      "status": "✅ CONCLUÍDO — migrado para arquitetura híbrida",
       "percentual": "100%",
       "processadores": {
-        "rain_accumulator": {
-          "status": "✅ CONCLUÍDO",
-          "arquivo": "src/processors/rain_accumulator.py",
-          "resultado": "Acumulados 1h/3h/6h/24h/72h/7d via SQL DuckDB"
-        },
-        "river_level_processor": {
-          "status": "✅ CONCLUÍDO",
-          "arquivo": "src/processors/river_level_processor.py",
-          "resultado": "% cota + NORMAL/ATENCAO/ALERTA/EMERGENCIA"
-        },
-        "alert_classifier": {
-          "status": "✅ CONCLUÍDO",
-          "arquivo": "src/processors/alert_classifier.py",
-          "resultado": "0 alertas ativos · rios todos NORMAL"
-        },
-        "spatial_interpolator": "⏳ PENDENTE — Kriging pykrige"
+        "rain_accumulator": "✅ v4 · série 30d do R2 → 8 janelas pandas → UPDATE Supabase (92 estações) — validado em produção",
+        "river_status": "✅ calculado pelo ana_collector (write_river_status) — NORMAL/ATENCAO/ALERTA/EMERGENCIA + % cota",
+        "spatial_interpolator": "⏳ BACKLOG — Kriging pykrige"
       }
     },
     "FASE_6_DASHBOARD": {
-      "status": "✅ CONCLUÍDO (base) · 🔄 v3.0 Windy-style implementado",
-      "percentual": "90%",
-      "url_local": "http://localhost:8501",
-      "comando": "streamlit run src/dashboard/app.py --server.port 8501",
-      "paginas_funcionando": {
-        "Visao_Geral": {
-          "status": "✅ v3.0 FUNCIONANDO",
-          "conteudo": [
-            "4 KPIs rios (NORMAL/ATENÇÃO/ALERTA/EMERGÊNCIA)",
-            "Seletor período [1h|6h|24h|48h|72h]",
-            "HeatMap GPM/CHIRPS (17.723 pontos · gradiente Windy azul→vermelho)",
-            "Círculos estações chuva coloridos por intensidade",
-            "Círculos INMET com _inmet_rain_color (6-25px · fill_opacity 0.85)",
-            "Legenda flutuante bottom-right",
-            "Toggles camadas sidebar (HeatMap · INMET · Rios)",
-            "Painel lateral: escala chuva + status rios + monitoramento",
-            "Top-5 maiores acumulados"
-          ]
-        },
-        "Previsoes": {
-          "status": "✅ v3.0 FUNCIONANDO",
-          "conteudo": [
-            "Seletor localidade + horizonte [6h|24h|36h|48h|72h|7d]",
-            "6 KPIs: CAPE · LI · K-Index · chuva 6h/24h · vento máx",
-            "Mapa Windy com círculos coloridos por chuva prevista",
-            "Meteograma multi-eixo: precipitação (Y1) · temperatura (Y2) · vento (Y3)",
-            "Rosa dos ventos (go.Barpolar · 16 setores · colorscale por velocidade)",
-            "Gráfico vento: velocidade Y1 verde + direção Y2 setas coloridas",
-            "Gráfico radiação solar: área amarela + bandas noturnas (20h-06h)",
-            "Cards resumo por modelo (Open-Meteo · NOAA · ECMWF)",
-            "Comparativo 10 pontos NWP (barras agrupadas 6h/24h/48h)"
-          ]
-        },
-        "Rios": {
-          "status": "✅ FUNCIONANDO",
-          "conteudo": "Gauges Plotly (0→emergência) + série histórica 72h + cotas marcadas"
-        },
-        "Chuva": {
-          "status": "✅ FUNCIONANDO",
-          "conteudo": "Mapa intensidade toggle 1h/6h/24h/72h + barras top-20 + 3 KPIs"
-        },
-        "Alertas": {
-          "status": "✅ FUNCIONANDO",
-          "conteudo": "Alertas ativos + histórico + distribuição por severidade"
-        },
-        "Sistema": {
-          "status": "✅ FUNCIONANDO",
-          "conteudo": "Status DB · APIs integradas · comandos update"
-        }
-      },
-      "funcionalidades": {
-        "auto_refresh": "✅ 10 minutos · streamlit-autorefresh",
-        "tema_dark": "✅ #0f172a via CSS injetado",
-        "cache": "✅ @st.cache_data(ttl=600)",
-        "mobile": "✅ breakpoint @media max-width 768px",
-        "mapa_camadas": "✅ HeatMap GPM · Chuva estações · INMET pontos · Rios",
-        "github_data_source": "✅ badge fonte dados (GitHub/local) no sidebar",
-        "data_loader": "✅ GitHub Raw → local fallback · gpm_precip · inmet_historico · inmet_stations",
-        "plotly_bgcolor_fix": "✅ rgba(30,41,59,0.27) — sem 8-digit hex",
-        "heatmap_windy": "✅ gradiente #313695→#a50026 · radius=15 · blur=20",
-        "meteogram_multiaxis": "✅ Y1 chuva · Y2 temp · Y3 vento · overlaying + anchor free",
-        "wind_rose": "✅ go.Barpolar · 16 setores 22.5° · colorscale velocidade",
-        "wind_chart": "✅ Y1 velocidade (verde) · Y2 direção setas coloridas por quadrante",
-        "solar_chart": "✅ área amarela shortwave_radiation + bandas noturnas 23h-09h UTC"
-      },
-      "melhorias_pendentes": {
-        "wrf_hydro_viewer": "⏳ Rede hidrográfica azul→vermelho por bacia",
-        "water_quality_view": "⏳ pH · O2 · condutividade · turbidez",
-        "ai_models_view": "⏳ LSTM por rio com IC 95%",
-        "deploy_streamlit": "⏳ streamlit.app público"
-      }
+      "status": "🔄 FUNCIONAL LOCAL — desacoplamento é a Etapa 1.4",
+      "percentual": "75%",
+      "paginas": "Visão Geral · Previsões · Rios · Chuva · Alertas · Sistema (+ camada NWP no mapa)",
+      "pendente_etapa_1_4": [
+        "Remover import duckdb e leituras locais",
+        "Consumir API v3 via @st.cache_data(ttl=600)",
+        "requirements_dashboard.txt enxuto",
+        "Deploy Streamlit Community Cloud"
+      ]
     },
     "FASE_7_GITHUB_ACTIONS": {
-      "status": "✅ CONCLUÍDO",
-      "percentual": "100%",
-      "repositorio_dados": "github.com/rafa-rebelo/climate-data-rs (público)",
-      "repositorio_codigo": "github.com/rafa-rebelo/climate-dashboard-rs (privado)",
-      "workflows": {
-        "collect_realtime": "✅ cron */10 * * * * · ANA + INMET + GPM/CHIRPS + NOAA + acumulados + progress",
-        "alerts_job": "✅ dispara após collect · verifica Telegram",
-        "dual_checkout": "✅ data-repo raiz + code-repo em code/",
-        "pythonpath": "✅ PYTHONPATH=${{ github.workspace }}/code",
-        "artefatos_publicados": [
-          "accumulated_rain.parquet",
-          "river_status.parquet",
-          "nwp_7days.parquet",
-          "climate.duckdb",
-          "progress.json",
-          "gpm_precip_1d.parquet",
-          "inmet_historico_rs.parquet",
-          "inmet_stations_rs.parquet"
-        ]
+      "status": "🟡 OPERACIONAL — cadência em estabilização",
+      "percentual": "90%",
+      "repositorio_ativo": "climate-dashboard-rs (privado) · 13 secrets · workflow híbrido",
+      "repositorio_legado": "climate-data-rs — ⚠️ DESATIVAR workflow antigo (tarefa do usuário)",
+      "workflow": {
+        "collect_realtime": "✅ ANA+INMET+GPM+NOAA+acumulados → Supabase+R2 · ZERO commits de dados",
+        "netrc_nasa": "✅ step cria ~/.netrc (GPM IMERG real)",
+        "alerts_job": "✅ verde · lista enxuta de pacotes · timeout 5min",
+        "cron": "🟡 GitHub degrada o agendamento (observado 2-4h em vez de 10min) · mudado para 7,27,47 · monitor de 24h decidirá",
+        "plano_b_cron": "Disparador externo gratuito (cron-job.org → POST workflow_dispatch com PAT) se a cadência não sustentar < 30min"
       }
     },
     "FASE_8_MODELOS_ML": {
-      "status": "⏳ PENDENTE",
+      "status": "⏳ PENDENTE (Fase 2 do roadmap)",
       "percentual": "0%",
-      "prerequisito": "30+ dias dados históricos radar e rios",
+      "prerequisito": "30+ dias de histórico no R2 — acumulando desde 10/06 → destrava ~10/07/2026",
       "modelos": {
-        "convlstm_nowcast": "⏳ aguarda REDEMET radar",
-        "lstm_sinos": "⏳ aguarda 30 dias histórico",
-        "lstm_taquari": "⏳ aguarda 30 dias histórico",
-        "lstm_jacui": "⏳ aguarda 30 dias histórico",
-        "lstm_guaiba": "⏳ aguarda 30 dias histórico",
-        "online_trainer": "⏳ PENDENTE",
+        "lstm_rios": "⏳ Guaíba/Jacuí/Taquari/Sinos · 6h/12h/24h/48h · IC 95% → river_ai_forecasts",
+        "convlstm_nowcast": "⏳ aguarda radar REDEMET",
         "drift_detector": "⏳ PENDENTE"
       }
     },
     "FASE_9_API_REST": {
-      "status": "⏳ PENDENTE",
-      "percentual": "0%",
-      "arquivo": "src/api/main.py",
-      "deploy": "Railway R$ 0/mês"
+      "status": "✅ CÓDIGO PRONTO — deploy pendente",
+      "percentual": "80%",
+      "arquivo": "src/api/main.py (v3 · Supabase+R2)",
+      "endpoints": [
+        "GET /health (ping Supabase+R2 + latência)",
+        "GET /api/v3/rivers/status (cache 5min · cores rgba)",
+        "GET /api/v3/weather/heatmap (GZip · grade IMERG)",
+        "GET /api/v3/stations/readings (JOIN stations)",
+        "GET /api/v3/analytics/history (Parquets R2 · days 1-90)",
+        "GET /api/v3/forecasts/rivers (placeholder Fase 2)"
+      ],
+      "deploy": "⏳ Render Free Tier — Procfile pronto na raiz (Etapa 1.4a)"
     },
     "FASE_10_ALERTAS": {
-      "status": "⏳ PENDENTE",
-      "percentual": "0%",
-      "telegram": "⏳ @BotFather → /newbot",
-      "webhooks": "⏳ PENDENTE"
+      "status": "🟡 CÓDIGO PRONTO — aguarda secrets",
+      "percentual": "85%",
+      "telegram_bot": "✅ migrado para Supabase · dispara só ALERTA/EMERGENCIA · throttle 1h persistente em alerts_log · comandos /status e /ping",
+      "pendente": "Secrets TELEGRAM_TOKEN + TELEGRAM_CHAT_ID no repo (decisão: última tarefa da etapa)",
+      "webhooks_b2b": "⏳ Fase 2 (base pronta: alerts_log)"
     },
     "FASE_11_TESTES_DEPLOY": {
-      "status": "⏳ PENDENTE",
-      "percentual": "0%"
+      "status": "🔄 ESTABILIZAÇÃO EM CURSO",
+      "percentual": "40%",
+      "monitor": "scripts/stability_monitor.py → data/stability_log.csv (amostras 15min)",
+      "criterios_etapa_1": [
+        "lag live_* < 30min por 24h — 🟡 medindo",
+        "taxa ANA > 80% — ✅ 100% em 7 runs (amostra 11/06)",
+        "Sinos atualizando — ⏳ aguarda 1º run pós-fix"
+      ]
     }
   },
-  "arquivos_criados": {
-    "FUNCIONANDO": {
-      "CLAUDE.md": "✅ 5 agentes",
-      "requirements.txt": "✅ rasterio 1.5.0 · rioxarray 0.22.0",
-      "config.yaml": "✅ cotas RS",
-      ".env": "✅ ANA + NASA configurados",
-      "src/database/db_manager.py": "✅ 11 tabelas + gpm_precip · 5.8MB",
-      "src/collectors/noaa_collector.py": "✅ 1.680 previsões",
-      "src/collectors/ana_collector.py": "✅ 1.171 registros",
-      "src/collectors/inmet_collector.py": "✅ ZIP público histórico · sem geo-restrição",
-      "src/collectors/gpm_collector.py": "✅ GPM IMERG + CHIRPS fallback · 17.723 pts RS · rasterio MemoryFile",
-      "src/processors/rain_accumulator.py": "✅ acumulados SQL",
-      "src/processors/river_level_processor.py": "✅ % cota",
-      "src/processors/alert_classifier.py": "✅ 0 alertas",
-      "src/dashboard/app.py": "✅ v3.0 Windy-style · HeatMap GPM · multi-eixo · vento · solar",
-      "src/dashboard/utils/data_loader.py": "✅ GitHub Raw + fallback local · gpm/inmet/stations",
-      "src/utils/progress_tracker.py": "✅ gera progress.json + JSONCRACK_FLUXOGRAMA.json",
-      "climate-data-rs/.github/workflows/collect_realtime.yml": "✅ cron 10min · ANA+INMET+GPM+NOAA · 8 artefatos publicados"
-    },
-    "PENDENTES": [
-      "src/collectors/radar_collector.py",
-      "src/processors/spatial_interpolator.py",
-      "src/models/convlstm_nowcast.py",
-      "src/models/lstm_river.py",
-      "src/models/online_trainer.py",
-      "src/models/drift_detector.py",
-      "src/dashboard/components/wrf_hydro_view.py",
-      "src/dashboard/components/water_quality_view.py",
-      "src/dashboard/components/ai_models_view.py",
-      "src/api/main.py",
-      "src/alerts/telegram_alert.py",
-      ".github/workflows/auto_retrain.yml"
-    ]
-  },
-  "dashboard_ao_vivo": {
-    "url": "http://localhost:8501",
-    "status": "✅ ONLINE · v3.0 Windy-style",
-    "banco_db": "✅ Online · 5.8 MB",
-    "estacoes_ativas": 102,
-    "leituras_chuva": 1144,
-    "niveis_rios": 1171,
-    "previsoes_nwp": 1680,
-    "gpm_pontos_rs": 17723,
-    "alertas_ativos": 0,
+  "dados_ao_vivo_ultimo_ciclo": {
+    "ciclo": "2026-06-11 23:13 UTC",
     "status_rios": {
-      "Guaíba": "🟢 NORMAL · 1.15m / 3.0m (38%)",
-      "Jacuí": "🟢 NORMAL · 0.65m / 7.0m (9%)",
-      "Taquari": "🟢 NORMAL · 1.29m / 5.0m (26%)"
-    }
+      "Guaíba": "🟢 NORMAL · 1.29m / 3.0m (43%)",
+      "Jacuí": "🟢 NORMAL · 1.32m / 7.0m (19%) · vazão 26 m³/s",
+      "Taquari": "🟢 NORMAL · 1.03m / 5.0m (21%) · vazão 45 m³/s",
+      "Sinos": "⏳ aguardando 1º ciclo com estações novas"
+    },
+    "alertas_ativos": 0
   },
   "proximas_acoes": {
-    "1_AGORA": "Telegram Bot — alertas no celular (@BotFather /newbot)",
-    "2_SEGUINTE": "Modelos LSTM — após 30 dias de dados coletados",
-    "3_SEGUINTE": "Deploy Streamlit Cloud público",
-    "4_PARALELO": "Cadastrar REDEMET api.redemet.aer.mil.br",
-    "5_PARALELO": "Configurar NASA_USER/NASA_PASS no GitHub Secrets (GPM IMERG real)"
-  },
-  "json_automatico": {
-    "status": "✅ IMPLEMENTADO",
-    "arquivo": "src/utils/progress_tracker.py",
-    "integracao": "climate-data-rs/.github/workflows/collect_realtime.yml — commit automático a cada 10min",
-    "resultado": "JSON Crack v3.0 atualizado automaticamente a cada execução do pipeline"
+    "1_AGORA": "Concluir estabilização 24h (monitor rodando) + decidir cron externo",
+    "2_USUARIO": "Desativar workflow do climate-data-rs · rotacionar senha Supabase · apagar SECRETS_PARA_COLAR.txt",
+    "3_ETAPA_1_4a": "Deploy API no Render (Procfile pronto)",
+    "4_ETAPA_1_4b": "Dashboard stateless consumindo a API",
+    "5_ULTIMA_DA_ETAPA": "Secrets TELEGRAM_TOKEN/CHAT_ID → ativar alertas",
+    "6_BACKLOG_PRIORITARIO": "cemaden_collector.py (chuva tempo real em áreas de risco)",
+    "7_FASE_2": "LSTM por rio (destrava ~10/07 com 30d de histórico R2)"
   },
   "notas_tecnicas": {
-    "duckdb_lock": "duckdb.IOException quando dashboard aberto — GPM salva Parquet mesmo assim",
-    "chirps_lag": "CHIRPS v2.0 tem ~37 dias de lag — busca de 5 a 60 dias com HEAD requests",
-    "plotly_bgcolor": "rgba(r,g,b,a) — 8-digit hex NÃO suportado pelo Plotly",
-    "niquests": "niquests em vez de requests — urllib3-future conflict",
-    "root_path": "parents[2] para src/collectors/*.py · parents[3] para src/dashboard/utils/*.py",
-    "heatmap_gradient": "strings como keys: {'0.0': '#313695'} não floats",
-    "nasa_pps_opensearch": "pmmpublisher.pps.eosdis.nasa.gov é SPA React — não é REST API. Usar NASA CMR."
+    "pooler_supabase": "aws-1-sa-east-1.pooler.supabase.com — IPv4 obrigatório no Actions; CUIDADO com o hífen em sa-east-1 (typo causou 2 dias de falha silenciosa)",
+    "ana_417": "ANA devolve 417 intermitente para IPs Cloudflare — retry exponencial 5x no autenticar() resolve",
+    "upserts": "Todo ON CONFLICT DO UPDATE inclui updated_at=NOW(); live_river_levels deduplicada por rio_id (Postgres proíbe atualizar a mesma linha 2x no mesmo INSERT)",
+    "runner_efemero": "Throttle de alertas persistido em alerts_log — memória não sobrevive entre runs",
+    "niquests": "niquests==3.19.0 pinado — nunca requests.Session() (urllib3-future)",
+    "alerts_job_slim": "requirements completo puxa torch ~2GB e estoura timeout — job alerts instala 6 pacotes",
+    "progress_tracker_legado": "src/utils/progress_tracker.py (gerador deste JSON na v3) ainda é DuckDB — este arquivo agora é mantido manualmente até o tracker ser migrado"
   },
   "custos": {
-    "TOTAL_MENSAL": "R$ 0,00"
+    "TOTAL_MENSAL": "R$ 0,00 (Supabase Free + R2 Free + Workers Free + Actions Free)"
   }
 }
