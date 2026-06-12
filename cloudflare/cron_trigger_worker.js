@@ -19,30 +19,39 @@ const REPO     = "climate-dashboard-rs";
 const WORKFLOW = "collect_realtime.yml";
 const REF      = "main";
 
+async function dispatch(env) {
+  const url =
+    `https://api.github.com/repos/${OWNER}/${REPO}` +
+    `/actions/workflows/${WORKFLOW}/dispatches`;
+
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${env.GH_PAT}`,
+      "Accept": "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+      "User-Agent": "climate-rs-cron-trigger",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ ref: REF }),
+  });
+  const body = resp.status === 204 ? "" : await resp.text();
+  return { status: resp.status, body: body.slice(0, 300) };
+}
+
 export default {
   async scheduled(event, env, ctx) {
-    const url =
-      `https://api.github.com/repos/${OWNER}/${REPO}` +
-      `/actions/workflows/${WORKFLOW}/dispatches`;
-
-    const resp = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${env.GH_PAT}`,
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-        "User-Agent": "climate-rs-cron-trigger",
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ ref: REF }),
-    });
-
+    const r = await dispatch(env);
     // 204 No Content = disparo aceito pelo GitHub
-    if (resp.status !== 204) {
-      const body = await resp.text();
-      console.error(`workflow_dispatch falhou: HTTP ${resp.status} — ${body.slice(0, 300)}`);
+    if (r.status !== 204) {
+      console.error(`workflow_dispatch falhou: HTTP ${r.status} — ${r.body}`);
     } else {
       console.log(`workflow_dispatch OK (${event.cron} @ ${new Date(event.scheduledTime).toISOString()})`);
     }
+  },
+
+  // Sem handler fetch: o Worker só atua via Cron Trigger (scheduled).
+  async fetch() {
+    return new Response("not found", { status: 404 });
   },
 };
