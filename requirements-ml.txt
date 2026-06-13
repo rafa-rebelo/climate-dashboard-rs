@@ -6,3 +6,5 @@ google-cloud-bigquery==3.41.0
 db-dtypes==1.7.0
 # Acelera o download de resultados grandes (REST → Storage API):
 google-cloud-bigquery-storage>=2.24.0
+# PyTorch CPU (instalar com --index-url https://download.pytorch.org/whl/cpu):
+torch>=2.12.0
