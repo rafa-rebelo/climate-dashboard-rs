@@ -31,9 +31,19 @@ from pathlib import Path
 
 import pandas as pd
 from dotenv import load_dotenv
-from google.api_core import exceptions as gcp_exceptions
-from google.cloud import bigquery
 from loguru import logger
+
+# google-cloud-bigquery é dep de TREINO (requirements-ml.txt), não instalada
+# no CI enxuto. Import opcional para que dataset_builder/inference (que só
+# reusam log_consumption/BIGQUERY_PROJECT_ID) carreguem sem bigquery.
+try:
+    from google.api_core import exceptions as gcp_exceptions
+    from google.cloud import bigquery
+    _BIGQUERY_OK = True
+except ImportError:
+    gcp_exceptions = None  # type: ignore[assignment]
+    bigquery = None  # type: ignore[assignment]
+    _BIGQUERY_OK = False
 
 load_dotenv()
 
@@ -117,6 +127,12 @@ def load_inmet_rs(start_year: int = 2000, end_year: int = 2026) -> pd.DataFrame:
         SystemExit: Se BIGQUERY_PROJECT_ID não estiver configurado, se a API
             estiver desabilitada (Forbidden) ou em erro inesperado de execução.
     """
+    if not _BIGQUERY_OK:
+        logger.error(
+            "google-cloud-bigquery não instalado — caminho de treino. "
+            "Use: pip install -r requirements-ml.txt"
+        )
+        sys.exit(1)
     if not BIGQUERY_PROJECT_ID:
         logger.error(
             "BIGQUERY_PROJECT_ID ausente no .env — adicione "

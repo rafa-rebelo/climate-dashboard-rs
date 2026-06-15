@@ -26,8 +26,17 @@ import boto3
 import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
-from google.cloud import bigquery
 from loguru import logger
+
+# bigquery só é usado no caminho de TREINO (_load_inmet_bacia_diario).
+# A inferência no CI importa este módulo só por _FEATURE_COLS/_r2_client e
+# não tem google-cloud-bigquery instalado (dep de requirements-ml.txt).
+try:
+    from google.cloud import bigquery
+    _BIGQUERY_OK = True
+except ImportError:
+    bigquery = None  # type: ignore[assignment]
+    _BIGQUERY_OK = False
 
 _SRC_DIR = __import__("pathlib").Path(__file__).resolve().parents[2]
 if str(_SRC_DIR) not in sys.path:
@@ -101,6 +110,11 @@ def _load_inmet_bacia_diario(rio_alvo: str, start_year: int) -> pd.DataFrame:
         KeyError: Se rio_alvo não estiver mapeado em _BACIAS_IBGE.
         google.api_core.exceptions.GoogleAPIError: Falha na query.
     """
+    if not _BIGQUERY_OK:
+        raise RuntimeError(
+            "google-cloud-bigquery não instalado — carga INMET é caminho de "
+            "treino. Use requirements-ml.txt (pip install -r requirements-ml.txt)."
+        )
     municipios = _BACIAS_IBGE[rio_alvo]
     ids = ", ".join(f"'{m}'" for m in municipios)
     logger.info(
