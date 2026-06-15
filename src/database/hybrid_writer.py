@@ -983,6 +983,23 @@ class HybridWriter:
                     # Conta rows afetados ANTES do commit para diagnóstico
                     affected = cur.rowcount
 
+                    # Purga a grade da OUTRA fonte: GPM IMERG (5.600 pts) e o
+                    # fallback CHIRPS (17.723 pts) usam grades de lat_lon_key
+                    # distintas, então o upsert não sobrescreve a grade antiga
+                    # e ela fica órfã. Mantém só a fonte recém-gravada.
+                    fontes_gravadas = {r[4] for r in rows}
+                    if len(fontes_gravadas) == 1:
+                        cur.execute(
+                            "DELETE FROM live_gpm_precip WHERE source <> %s",
+                            (next(iter(fontes_gravadas)),),
+                        )
+                        if cur.rowcount:
+                            logger.info(
+                                f"    PG live_gpm_precip: {cur.rowcount:,} linhas "
+                                f"de grade antiga purgadas (fonte != "
+                                f"{next(iter(fontes_gravadas))})"
+                            )
+
                 conn.commit()
 
                 # Verificação pós-commit: conta efetiva no banco
