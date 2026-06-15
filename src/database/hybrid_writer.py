@@ -695,7 +695,8 @@ class HybridWriter:
                                 wind_speed   = EXCLUDED.wind_speed,
                                 cape_j_kg    = EXCLUDED.cape_j_kg,
                                 lifted_index = EXCLUDED.lifted_index,
-                                k_index      = EXCLUDED.k_index
+                                k_index      = EXCLUDED.k_index,
+                                updated_at   = NOW()
                         """, rows, page_size=500)
                     conn.commit()
                     result.pg_rows = len(rows)

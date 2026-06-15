@@ -25,7 +25,16 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
-import duckdb
+# duckdb é só do caminho legado de fallback (_upsert_duckdb), nunca usado
+# em produção (HybridWriter cobre Supabase+R2). Opcional para permitir o
+# requirements-collect.txt enxuto no CI, que não instala duckdb.
+try:
+    import duckdb
+    _DUCKDB_OK = True
+except ImportError:
+    duckdb = None  # type: ignore[assignment]
+    _DUCKDB_OK = False
+
 import numpy as np
 import pandas as pd
 from loguru import logger
@@ -593,6 +602,9 @@ def _upsert_duckdb(df: pd.DataFrame) -> int:
         Número de linhas inseridas.
     """
     if df.empty:
+        return 0
+    if not _DUCKDB_OK:
+        logger.warning("duckdb indisponível — _upsert_duckdb (fallback legado) ignorado.")
         return 0
     try:
         conn = duckdb.connect(str(_DB_PATH))
