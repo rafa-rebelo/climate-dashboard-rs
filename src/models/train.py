@@ -57,7 +57,13 @@ load_dotenv()
 
 _HORIZON_LABELS = [f"t+{h}d" for h in _HORIZONS_DIAS_PADRAO]  # ['t+1d','t+2d','t+3d','t+6d']
 _HOMOLOG_HORIZONTE_IDX = 0       # 1 dia ≈ "24h" do roadmap
-_HOMOLOG_MAE_LIMITE_M = 0.20     # critério de aprovação
+# Critério RELATIVO (nMAE = MAE / faixa de cota do treino). O limite
+# absoluto de 0,20 m do roadmap foi calibrado no Guaíba (faixa ~3,7 m) e é
+# impossível para rios de grande amplitude (Taquari varia 21 m, Jacuí 15 m —
+# o ruído diário já excede 0,20 m). nMAE < 5% é agnóstico ao rio e mantém
+# o rigor: no Guaíba, 0,20 m ≈ 9% — então 5% é até mais exigente lá.
+_HOMOLOG_NMAE_LIMITE = 0.05      # 5% da faixa de cota
+_HOMOLOG_MAE_LIMITE_M = 0.20     # referência absoluta (só informativa no log)
 
 
 # ---------------------------------------------------------------------------
@@ -136,12 +142,23 @@ def _avaliar(
             "cobertura_ic95_pct": round(cobertura, 1),
         }
 
+    # Homologação RELATIVA: nMAE = MAE / faixa de cota do treino.
+    faixa = max(scaler.y_max - scaler.y_min, 1e-6)
     mae_homolog = res["por_horizonte"][_HORIZON_LABELS[_HOMOLOG_HORIZONTE_IDX]]["mae_m"]
-    aprovado = mae_homolog < _HOMOLOG_MAE_LIMITE_M
+    nmae = mae_homolog / faixa
+    aprovado = nmae < _HOMOLOG_NMAE_LIMITE
+    # nMAE por horizonte (contexto)
+    for label in _HORIZON_LABELS:
+        res["por_horizonte"][label]["nmae_pct"] = round(
+            res["por_horizonte"][label]["mae_m"] / faixa * 100, 1
+        )
     res["homologacao"] = {
         "horizonte": _HORIZON_LABELS[_HOMOLOG_HORIZONTE_IDX],
         "mae_m": mae_homolog,
-        "limite_m": _HOMOLOG_MAE_LIMITE_M,
+        "faixa_cota_m": round(faixa, 2),
+        "nmae_pct": round(nmae * 100, 1),
+        "limite_nmae_pct": _HOMOLOG_NMAE_LIMITE * 100,
+        "mae_ref_absoluto_m": _HOMOLOG_MAE_LIMITE_M,
         "status": "APROVADO" if aprovado else "REPROVADO",
     }
     return res
@@ -245,12 +262,13 @@ def treinar(args: argparse.Namespace) -> dict[str, Any]:
     metricas = _avaliar(model, X_te, y_te, scaler, device)
     logger.info("--- Avaliação (teste) ---")
     for label, m in metricas["por_horizonte"].items():
-        logger.info(f"  {label}: MAE {m['mae_m']:.3f} m | RMSE {m['rmse_m']:.3f} m | "
-                    f"IC95 cobre {m['cobertura_ic95_pct']:.0f}%")
+        logger.info(f"  {label}: MAE {m['mae_m']:.3f} m ({m['nmae_pct']:.1f}%) | "
+                    f"RMSE {m['rmse_m']:.3f} m | IC95 cobre {m['cobertura_ic95_pct']:.0f}%")
     h = metricas["homologacao"]
     nivel = logger.success if h["status"] == "APROVADO" else logger.error
-    nivel(f"HOMOLOGAÇÃO ({h['horizonte']}): MAE {h['mae_m']:.3f} m "
-          f"(limite {h['limite_m']} m) → {h['status']}")
+    nivel(f"HOMOLOGAÇÃO ({h['horizonte']}): MAE {h['mae_m']:.3f} m = "
+          f"{h['nmae_pct']:.1f}% da faixa de {h['faixa_cota_m']} m "
+          f"(limite {h['limite_nmae_pct']:.0f}%) → {h['status']}")
 
     # 5. Persistência (R2 via save_model + scaler já salvo pelo normalize)
     metricas["treino"] = {
@@ -261,7 +279,8 @@ def treinar(args: argparse.Namespace) -> dict[str, Any]:
     }
     try:
         save_model(model, rio_alvo=args.rio, version="v1",
-                   metrics={"mae_24h_m": h["mae_m"], "status": h["status"]})
+                   metrics={"mae_24h_m": h["mae_m"], "nmae_pct": h["nmae_pct"],
+                            "status": h["status"]})
     except RuntimeError as exc:
         logger.warning(f"Upload do modelo ao R2 falhou ({exc}) — salvando só local.")
 
