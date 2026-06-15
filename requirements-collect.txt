@@ -1,0 +1,29 @@
+# Dependências enxutas do JOB DE COLETA (GitHub Actions).
+# requirements.txt completo puxa torch (~2GB) + libs CUDA + streamlit/fastapi,
+# que NÃO são usados na coleta — só inflam o install e arriscam o timeout de 12min.
+# Mantém os mesmos pins do requirements.txt.
+
+# Core
+pandas==2.2.1
+numpy==1.26.4
+pyarrow==15.0.2
+python-dotenv==1.0.1
+pyyaml==6.0.1
+loguru==0.7.2
+tenacity==8.2.3
+requests==2.31.0
+requests-cache>=1.3.2
+niquests==3.19.0
+
+# Persistência (Supabase + R2)
+psycopg2-binary==2.9.9
+boto3==1.34.50
+
+# NWP (Open-Meteo)
+openmeteo-requests>=1.0.0
+
+# GPM IMERG / CHIRPS (satélite)
+earthaccess==0.9.0
+h5py==3.11.0
+netCDF4==1.6.5
+rasterio==1.4.4
