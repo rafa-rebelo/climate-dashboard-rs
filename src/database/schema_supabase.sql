@@ -122,17 +122,20 @@ CREATE INDEX IF NOT EXISTS idx_alerts_key_time
     ON alerts_log (alert_key, sent_at DESC);
 ALTER TABLE alerts_log DISABLE ROW LEVEL SECURITY;
 
--- ── river_ai_forecasts — previsões LSTM (Fase 2, vazia) ──────
+-- ── river_ai_forecasts — previsões LSTM (snapshot vivo) ──────
+-- Semântica de snapshot: 1 linha por rio × horizonte, sempre a previsão
+-- mais recente (igual às tabelas live_*). PK (rio_id, horizonte_h) para
+-- o UPSERT da inferência. horizonte_h em HORAS: 24/48/72/144 = 1/2/3/6 dias.
 CREATE TABLE IF NOT EXISTS river_ai_forecasts (
-    rio_id          TEXT NOT NULL,
-    forecast_ts     TIMESTAMPTZ NOT NULL,
-    valid_ts        TIMESTAMPTZ NOT NULL,
+    rio_id           TEXT NOT NULL,
+    horizonte_h      INTEGER NOT NULL,
+    valid_ts         TIMESTAMPTZ,
     nivel_previsto_m DOUBLE PRECISION,
-    ic_inferior_m   DOUBLE PRECISION,
-    ic_superior_m   DOUBLE PRECISION,
-    horizonte_h     INTEGER,
-    modelo_versao   TEXT,
-    created_at      TIMESTAMPTZ DEFAULT NOW(),
-    PRIMARY KEY (rio_id, valid_ts, horizonte_h)
+    ic_inferior_m    DOUBLE PRECISION,
+    ic_superior_m    DOUBLE PRECISION,
+    modelo_versao    TEXT,
+    status           TEXT DEFAULT 'ok',
+    gerado_em        TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (rio_id, horizonte_h)
 );
 ALTER TABLE river_ai_forecasts DISABLE ROW LEVEL SECURITY;

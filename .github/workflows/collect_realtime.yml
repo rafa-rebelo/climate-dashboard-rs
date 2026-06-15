@@ -76,6 +76,19 @@ jobs:
         continue-on-error: true
         run: python src/processors/rain_accumulator.py
 
+      # PyTorch CPU (~200MB) para a inferência do LSTM. Wheel fica em cache
+      # pip (setup-python cache:pip), então só o 1o run paga o download.
+      - name: Instalar PyTorch CPU (inferência ML)
+        continue-on-error: true
+        run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+      # Inferência leve (<30s): baixa o .pt do R2, prevê cotas e faz UPSERT
+      # em river_ai_forecasts. continue-on-error: se não houver modelo
+      # treinado para um rio, grava status=pendente sem quebrar a coleta.
+      - name: Inferência LSTM (previsão de cotas)
+        continue-on-error: true
+        run: python src/models/inference.py
+
   # ─────────────────────────────────────────────
   # JOB 2 — Alertas Telegram (timeout 3 min)
   # ─────────────────────────────────────────────
