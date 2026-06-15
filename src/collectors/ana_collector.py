@@ -122,11 +122,14 @@ RIOS_RS: dict[str, dict] = {
         "municipios":        ["Porto Alegre", "Eldorado do Sul"],
     },
     "Camaquã": {
-        "codigos":           [87540000, 87530000],
+        # 15/06: 87540000/87530000 sem telemetria (0 leituras, congelado
+        # desde 12/06). Substituído por 87905000 Passo do Mendonça (Cristal),
+        # telemétrica ativa — mesmo padrão do fix do Sinos.
+        "codigos":           [87905000],
         "cota_atencao_m":    3.0,
         "cota_alerta_m":     4.0,
         "cota_emergencia_m": 5.0,
-        "municipios":        ["Camaquã"],
+        "municipios":        ["Camaquã", "Cristal"],
     },
     "Lagoa_Patos": {
         "codigos":           [87030000],
