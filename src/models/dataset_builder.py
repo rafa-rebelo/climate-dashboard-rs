@@ -51,33 +51,40 @@ load_dotenv()
 # Constantes
 # ---------------------------------------------------------------------------
 
-# Municípios representativos da bacia hidrográfica de cada rio-alvo
-# (códigos IBGE de 7 dígitos — estáveis; cf. grade NWP do config.yaml).
+# Municípios representativos da bacia, com códigos IBGE VERIFICADOS contra
+# basedosdados.br_inmet_bdmep.estacao em 15/06/2026 — só municípios que de
+# fato têm estação INMET com microdados. (O mapeamento anterior usava códigos
+# errados: Lajeado/São Leopoldo/Novo Hamburgo não têm estação; Caxias é
+# 4308201 não 4305108; Cruz Alta é 4306106 não 4305355; Bagé é 4301602.)
 _BACIAS_IBGE: dict[str, dict[str, str]] = {
-    "guaiba": {
+    "guaiba": {  # exutório de quase todo o leste do RS — set amplo
         "4314902": "Porto Alegre",
-        "4305108": "Caxias do Sul",
+        "4308201": "Caxias do Sul (Aeroporto)",
         "4316907": "Santa Maria",
         "4314100": "Passo Fundo",
     },
-    "jacui": {
+    "jacui": {  # bacia central grande
         "4316907": "Santa Maria",
-        "4314100": "Passo Fundo",
-        "4305355": "Cruz Alta",
+        "4306106": "Cruz Alta",
+        "4310009": "Ibirubá",
+        "4320800": "Soledade",
     },
-    "taquari": {
-        "4311403": "Lajeado",
-        "4305108": "Caxias do Sul",
-        "4314050": "Passo Fundo",
+    "taquari": {  # Taquari-Antas (NE)
+        "4321451": "Teutônia",
+        "4302105": "Bento Gonçalves",
+        "4320800": "Soledade",
+        "4311304": "Lagoa Vermelha",
     },
-    "sinos": {
-        "4318705": "São Leopoldo",
-        "4313409": "Novo Hamburgo",
+    "sinos": {  # bacia do Sinos (NE metropolitano)
+        "4303905": "Campo Bom",
+        "4316006": "Rolante",
+        "4304408": "Canela",
         "4314902": "Porto Alegre",
     },
-    "camaqua": {
+    "camaqua": {  # sudeste
         "4303509": "Camaquã",
-        "4300406": "Bagé",
+        "4304507": "Canguçu",
+        "4306908": "Encruzilhada do Sul",
     },
 }
 

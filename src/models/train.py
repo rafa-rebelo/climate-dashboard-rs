@@ -168,7 +168,7 @@ def treinar(args: argparse.Namespace) -> dict[str, Any]:
 
     # 1-2. Dataset → sequências → split temporal → normalização
     df = _load_dataframe(args.rio, args.colab)
-    X, y, datas = create_sequences(df, seq_len=72)
+    X, y, datas = create_sequences(df, seq_len=args.seq_len)
     if len(X) < 200:
         raise RuntimeError(f"Sequências insuficientes ({len(X)}) — dataset muito curto.")
     X_tr, X_va, X_te, y_tr, y_va, y_te = split_sequences(X, y, datas=datas)
@@ -309,6 +309,8 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--rio", default="guaiba",
                    choices=["guaiba", "jacui", "taquari", "sinos", "camaqua"])
     p.add_argument("--epochs", type=int, default=100)
+    p.add_argument("--seq_len", type=int, default=72,
+                   help="Janela de entrada em dias (default 72)")
     p.add_argument("--batch_size", type=int, default=32)
     p.add_argument("--lr", type=float, default=0.001)
     p.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
