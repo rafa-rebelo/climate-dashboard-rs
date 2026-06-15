@@ -64,9 +64,11 @@ jobs:
           printf 'machine urs.earthdata.nasa.gov\nlogin %s\npassword %s\n' "$NASA_USER" "$NASA_PASS" > ~/.netrc
           chmod 600 ~/.netrc
 
+      # --dias=2: janela maior reduz queda para CHIRPS quando o granule
+      # IMERG Early mais recente (latência ~4-6h) ainda não foi publicado.
       - name: Coletar precipitação satélite (GPM IMERG NASA)
         continue-on-error: true
-        run: python src/collectors/gpm_collector.py
+        run: python src/collectors/gpm_collector.py --dias 2
 
       - name: Coletar previsões NWP (Open-Meteo / NOAA)
         continue-on-error: true
