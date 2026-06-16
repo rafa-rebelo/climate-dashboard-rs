@@ -183,6 +183,17 @@ def _load_cotas_ana(rio_alvo: str, start_year: int) -> pd.DataFrame:
     Returns:
         DataFrame com data e cota_m.
     """
+    # Taquari/Jacuí usam a API REST nova (qualidade nos dias recentes) com
+    # fallback SOAP para o histórico profundo. Os outros 3 rios seguem SOAP puro.
+    if rio_alvo in ("taquari", "jacui"):
+        from models.ana_fetcher_v2 import fetch_rio_com_fallback
+        logger.info(f"ANA REST+SOAP (fallback): {rio_alvo}, {start_year}-2026...")
+        df = fetch_rio_com_fallback(rio_alvo, start_year, 2026)
+        if df.empty:
+            logger.warning(f"  ANA: {rio_alvo} sem dados — fallback puro SOAP.")
+        return df[["data", "cota_m"]] if not df.empty else \
+            pd.DataFrame(columns=["data", "cota_m"])
+
     cod = ESTACOES_RS[rio_alvo][0]
     logger.info(f"ANA SOAP: estação {cod} ({rio_alvo}), {start_year}-2026...")
     df = fetch_serie_historica(

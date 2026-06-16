@@ -330,6 +330,167 @@ def reconciliar_estacoes_taquari_jacui() -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# 5. Série de rio (REST recente) + fallback SOAP (histórico profundo)
+# ---------------------------------------------------------------------------
+
+# Alias semântico pedido na spec.
+fetch_inventario_ativo = fetch_inventario_estacoes
+
+
+def fetch_serie_rio(
+    cod_estacao: int,
+    data_inicio: str,
+    data_fim: str,
+) -> pd.DataFrame:
+    """Série diária do rio via REST, agregando as leituras 15-min OK por dia.
+
+    IMPORTANTE: a API REST telemétrica só serve os ~últimos 30 dias. Pedir
+    janelas antigas retorna vazio. Esta função pagina em janelas de 30 dias
+    do mais recente para o mais antigo e PARA assim que uma janela volta
+    vazia (limite real da REST) — proteção contra centenas de chamadas e
+    bloqueio de IP. Para histórico profundo, use fetch_rio_com_fallback.
+
+    Args:
+        cod_estacao: Código ANA da estação.
+        data_inicio: Data inicial "dd/MM/yyyy".
+        data_fim: Data final "dd/MM/yyyy".
+
+    Returns:
+        DataFrame com data (diária), cota_m, vazao_m3s, chuva_mm —
+        só dias com leituras de qualidade OK (status=0).
+    """
+    ini = datetime.strptime(data_inicio, "%d/%m/%Y").date()
+    fim = datetime.strptime(data_fim, "%d/%m/%Y").date()
+    frames: list[pd.DataFrame] = []
+    janelas_vazias = 0
+    cursor = fim
+    max_janelas = 6  # ~180 dias — teto de segurança (REST só tem ~30)
+
+    for _ in range(max_janelas):
+        if cursor < ini:
+            break
+        df = fetch_serie_telemetrica(cod_estacao, dias_busca=30)
+        if df.empty:
+            janelas_vazias += 1
+            if janelas_vazias >= 1:  # REST esgotou — não insistir (IP block)
+                break
+        else:
+            frames.append(df)
+        cursor = cursor - timedelta(days=30)
+        # A REST sempre retorna a janela mais recente (dias_busca relativo a
+        # hoje), então só faz sentido 1 chamada — quebramos após a primeira.
+        break
+
+    if not frames:
+        return pd.DataFrame(columns=["data", "cota_m", "vazao_m3s", "chuva_mm"])
+
+    bruto = pd.concat(frames, ignore_index=True)
+    bruto["data"] = pd.to_datetime(bruto["data_hora_medicao"]).dt.date
+    diario = (
+        bruto.groupby("data")
+        .agg(cota_m=("cota_m", "mean"),
+             vazao_m3s=("vazao_m3s", "mean"),
+             chuva_mm=("chuva_mm", "sum"))
+        .reset_index()
+    )
+    diario = diario[(diario["data"] >= ini) & (diario["data"] <= fim)]
+    return diario.reset_index(drop=True)
+
+
+def reconciliar_estacoes(rio_alvo: str) -> dict[str, Any]:
+    """Verifica/corrige o código de estação do rio contra o inventário ativo.
+
+    Args:
+        rio_alvo: 'taquari' ou 'jacui'.
+
+    Returns:
+        Dict com codigo_atual, ativo (bool), e codigo_recomendado (mantém o
+        atual se ativo; senão sugere a 1ª telemétrica ativa do rio).
+    """
+    from models.ana_fetcher import ESTACOES_RS
+
+    atual = str(ESTACOES_RS.get(rio_alvo, [None])[0])
+    inv = fetch_inventario_ativo()
+    if inv.empty or "codigoestacao" not in inv.columns:
+        return {"codigo_atual": atual, "ativo": None, "codigo_recomendado": atual}
+
+    ativos = set(inv["codigoestacao"].astype(str))
+    ativo = atual in ativos
+    recomendado = atual
+    if not ativo and "Rio_Nome" in inv.columns and "Tipo_Telem" in inv.columns:
+        termo = "TAQUARI" if rio_alvo == "taquari" else "JACU"
+        cand = inv[
+            inv["Rio_Nome"].astype(str).str.upper().str.contains(termo, na=False)
+            & (inv["Tipo_Telem"].astype(str) == "1")
+        ]
+        if not cand.empty:
+            recomendado = str(cand.iloc[0]["codigoestacao"])
+            logger.warning(f"{rio_alvo}: código {atual} inativo → recomendado {recomendado}.")
+    if ativo:
+        logger.info(f"{rio_alvo}: código {atual} ativo no inventário REST — mantido.")
+    return {"codigo_atual": atual, "ativo": ativo, "codigo_recomendado": recomendado}
+
+
+def fetch_rio_com_fallback(
+    rio_alvo: str,
+    start_year: int,
+    end_year: int = 2026,
+) -> pd.DataFrame:
+    """Cotas diárias do rio: SOAP (histórico profundo) + REST (recente OK).
+
+    A REST telemétrica só tem ~30 dias, então NÃO serve como fonte do
+    histórico 2000-2026 — o SOAP (HidroSerieHistorica) é a espinha dorsal.
+    A REST entra como CAMADA DE QUALIDADE nos dias recentes (leituras
+    15-min com status filtrado), sobrescrevendo o SOAP onde houver
+    sobreposição. Loga quantos dias cada fonte contribuiu.
+
+    Args:
+        rio_alvo: 'taquari' ou 'jacui'.
+        start_year: Ano inicial.
+        end_year: Ano final.
+
+    Returns:
+        DataFrame com data e cota_m (união SOAP+REST, REST tem prioridade
+        nos dias recentes).
+    """
+    from models import ana_fetcher as soap
+
+    rec = reconciliar_estacoes(rio_alvo)
+    cod = int(rec["codigo_recomendado"])
+
+    # 1. Espinha dorsal: SOAP histórico
+    df_soap = soap.fetch_serie_historica(
+        cod, f"01/01/{start_year}", f"31/12/{end_year}", tipo_dados=1
+    )
+    n_soap = len(df_soap)
+    base = df_soap[["data", "cota_m"]].copy() if not df_soap.empty else \
+        pd.DataFrame(columns=["data", "cota_m"])
+
+    # 2. Camada de qualidade: REST recente
+    n_rest = 0
+    try:
+        df_rest = fetch_serie_rio(cod, "01/01/2026", "31/12/2026")
+        if not df_rest.empty:
+            n_rest = len(df_rest)
+            rest = df_rest[["data", "cota_m"]].dropna(subset=["cota_m"])
+            base = (
+                pd.concat([base, rest], ignore_index=True)
+                .sort_values("data")
+                .drop_duplicates(subset="data", keep="last")  # REST sobrescreve
+                .reset_index(drop=True)
+            )
+    except Exception as exc:  # noqa: BLE001 — REST nunca derruba a fonte SOAP
+        logger.warning(f"{rio_alvo}: REST indisponível ({str(exc)[:50]}) — só SOAP.")
+
+    fonte = "SOAP+REST" if n_rest else "SOAP (REST sem dados)"
+    logger.info(
+        f"{rio_alvo} [{cod}]: {len(base):,} dias | fonte: {fonte} "
+        f"(SOAP {n_soap:,} dias + REST {n_rest} dias recentes)"
+    )
+    return base[["data", "cota_m"]].reset_index(drop=True)
+
+
+# ---------------------------------------------------------------------------
 # Standalone — só diagnóstico (NÃO sobrescreve ana_fetcher.py)
 # ---------------------------------------------------------------------------
 
