@@ -77,7 +77,8 @@
     {
       "id": "B4",
       "item": "Higiene: grade CHIRPS órfã + estações Sinos mortas",
-      "resolucao": "✅ 17.723 linhas CHIRPS deletadas; Sinos: 4 códigos sem telemetria substituídos por 87382000 São Leopoldo + 87380000 Campo Bom + 87376000 Foz do Paranhana (9fce16c) — validados com dados do próprio dia"
+      "resolucao": "✅ 17.723 linhas CHIRPS órfãs deletadas; purge automático (f3dd3f2) garante grade ÚNICA por ciclo; Sinos: 4 códigos sem telemetria substituídos por 87382000 São Leopoldo + 87380000 Campo Bom + 87376000 Foz do Paranhana (9fce16c)",
+      "criterio_homologacao": "DECISÃO 16/06 (Opção A): B4 cumprido = live_gpm_precip contém UMA fonte de satélite por vez (sem grades órfãs coexistindo). O literal 'CHIRPS=0' foi descartado porque CHIRPS é fallback legítimo quando IMERG indisponível — exigir IMERG presente penalizaria a resiliência e poderia deletar dado vivo. Verificado 16/06: grade única (GPM_IMERG_EARLY) → CUMPRIDO sob ambos os critérios."
     }
   ],
   "estabilizacao_24h_em_curso": {
