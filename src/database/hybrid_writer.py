@@ -815,12 +815,13 @@ class HybridWriter:
         self,
         df: pd.DataFrame,
         path: Any = None,   # ignorado
+        r2_fonte: str = "live_rain_readings",
     ) -> WriteResult:
         """Persiste leituras brutas de chuva/meteorologia INMET.
 
         PG: INSERT ON CONFLICT DO NOTHING em ``live_rain_readings``
         (PK: station_id, timestamp).
-        R2: ``historico/live_rain_readings/…``
+        R2: ``historico/{r2_fonte}/…``
 
         Mapeamento de colunas INMET → Supabase:
           ts          → timestamp
@@ -833,6 +834,12 @@ class HybridWriter:
             df: DataFrame INMET com station_id, ts, rain_1h_mm,
                 temperature, humidity, pressure_hpa, wind_speed, wind_dir.
             path: Ignorado (sem arquivo local).
+            r2_fonte: Prefixo Hive do Parquet no R2 (Fluxo B). O PG (Fluxo A)
+                grava SEMPRE em ``live_rain_readings``; só o particionamento do
+                R2 muda. Coletores de cadência distinta (ex.: CEMADEN ~10 min)
+                usam um prefixo próprio (``live_rain_cemaden``) para não colidir
+                com a série de 30 dias do INMET, que o rain_accumulator consome
+                pegando o Parquet MAIS RECENTE do prefixo.
 
         Returns:
             WriteResult com estatísticas.
@@ -902,7 +909,7 @@ class HybridWriter:
 
         s3 = _r2_client()
         if s3 is not None:
-            _r2_upload(df, "live_rain_readings", result, s3)
+            _r2_upload(df, r2_fonte, result, s3)
 
         result.duration_s = time.monotonic() - t0
         result.log_summary()

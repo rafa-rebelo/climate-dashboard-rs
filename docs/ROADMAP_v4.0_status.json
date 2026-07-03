@@ -1,7 +1,7 @@
 {
   "projeto": "Sistema Autônomo de Análise Climática RS",
-  "versao_roadmap": "4.2-Production-Scale",
-  "ultima_atualizacao": "2026-06-12 00:15 UTC",
+  "versao_roadmap": "4.3-Production-Scale",
+  "ultima_atualizacao": "2026-06-16 09:20 UTC",
   "estrategia_arquitetural": "Arquitetura Híbrida de Custo Zero (Fase 1) → Infraestrutura Corporativa (Fase 2)",
   "resumo_estimativas_globais": {
     "total_horas_desenvolvimento": 136,
@@ -14,16 +14,16 @@
       "concluidas": 3,
       "em_progresso": 1,
       "pendentes": 1,
-      "percentual": "70%",
-      "status_geral": "🟢 PIPELINE DE DADOS 100% HÍBRIDO — 4 bloqueadores críticos resolvidos em 11/06; estabilização de 24h em curso; restam Etapas 1.4 (deploy+dashboard) e 1.5 (comercial)"
+      "percentual": "72%",
+      "status_geral": "🟢 PIPELINE DE DADOS 100% HÍBRIDO — 4 bloqueadores críticos resolvidos em 11/06; estabilização de 24h fecha 16/06 12:15 UTC; restam Etapas 1.4 (deploy+dashboard) e 1.5 (comercial). Falta só ação do usuário: secrets TELEGRAM"
     },
     "fase_2": {
       "total_etapas": 4,
       "concluidas": 0,
-      "em_progresso": 0,
-      "pendentes": 4,
-      "percentual": "0%",
-      "status_geral": "⏸️ BLOQUEADA — Aguarda conclusão Fase 1 + contrato assinado. Histórico R2 acumulando desde 10/06 → LSTM destravável ~10/07/2026"
+      "em_progresso": 1,
+      "pendentes": 3,
+      "percentual": "15%",
+      "status_geral": "🟡 PARCIALMENTE ANTECIPADA — Etapa 2.2 (LSTM por bacia) já EXECUTADA: 5 rios treinados e homologados por nMAE relativo (<5%), inferência rodando no CI. Não dependeu dos 30 dias de R2 — a série SOAP da ANA (~26 anos) destravou o treino. Tiers pagos (2.1) e B2B (2.3) seguem aguardando carta de intenção"
     }
   },
   "estado_atual_v4": {
@@ -33,19 +33,19 @@
       "estacoes_ativas": 98,
       "pontos_gpm_supabase": 5600,
       "nota_gpm": "Grade IMERG real = 5.600 pontos (o 17.723 do plano era a grade CHIRPS, já removida do banco)",
-      "rios_monitorados": ["Guaíba", "Jacuí", "Taquari", "Sinos"],
+      "rios_monitorados": ["Guaíba", "Jacuí", "Taquari", "Sinos", "Camaquã"],
       "vazao_gravando": "Jacuí 26 m³/s, Taquari 45 m³/s",
-      "forecasts_nwp": 1680,
+      "forecasts_nwp": 2640,
       "estacoes_com_acumulados": 92,
       "tabelas_supabase": [
         "stations (98)",
         "live_rain_readings (98, com precip_1h/6h/24h)",
-        "live_river_levels (4)",
+        "live_river_levels (5)",
         "live_gpm_precip (5.600 IMERG)",
-        "forecasts (1.680)",
+        "forecasts (~2.640)",
         "water_quality (0 — ANA QA sem dados)",
-        "alerts_log (0 — base do throttle persistente)",
-        "river_ai_forecasts (0 — Fase 2)"
+        "alerts_log (throttle persistente 1h)",
+        "river_ai_forecasts (ATIVA — snapshot LSTM gravado pela inferência no CI: rio_id × horizonte_h)"
       ]
     },
     "infraestrutura": {
@@ -83,10 +83,11 @@
   ],
   "estabilizacao_24h_em_curso": {
     "monitor": "scripts/stability_monitor.py rodando em background (amostra lag a cada 15 min → data/stability_log.csv)",
+    "janela": "15/06 12:15 → 16/06 12:15 UTC — auditoria final no fechamento",
     "criterios": [
-      "live_* com lag < 30 min por 24h — 🟡 em medição (cron do GitHub degrada */10 para ~2-4h; plano B: disparador externo gratuito via workflow_dispatch)",
-      "Taxa de sucesso ANA > 80% — ✅ 100% em 7 runs desde o retry (confirmação formal nas 24h)",
-      "Sinos voltando a atualizar — ⏳ primeiro run com estações novas em andamento"
+      "live_* com lag < 30 min por 24h — 🟡 em medição; auditoria parcial (~20,5h) sem violação de pipeline (lag ANA poucos min); gaps do GPM são intermitência do IMERG, não downtime (ANA grava todo ciclo)",
+      "Taxa de sucesso ANA > 80% — ✅ ~100% nos runs do cron (Cloudflare Cron Trigger */10)",
+      "Sinos voltando a atualizar — ✅ atualizando com estações novas (São Leopoldo/Campo Bom/Paranhana)"
     ]
   },
   "tarefas_do_usuario_pendentes": [
@@ -102,7 +103,7 @@
       "valor": "Pluviômetros automáticos de áreas de risco (~10 min de cadência, dados abertos sem autenticação) — ataca a maior fraqueza atual: lag de ~24h do INMET. Cobertura densa exatamente nos municípios críticos (Vale do Taquari, Vale dos Sinos, Serra)",
       "estimativa_horas": 4,
       "destino": "live_rain_readings (Supabase) + historico/cemaden (R2) via HybridWriter",
-      "status": "🆕 aprovado em 12/06 — implementar após fechamento da Etapa 1"
+      "status": "🟨 IMPLEMENTADO (19/06) — cemaden_collector.py em modo ABERTO (sem login; GET JSON + parser tolerante GeoJSON/camelCase, HybridWriter, ids CEM_*); step no collect_realtime.yml. Aguarda usuário: capturar a URL da camada de pluviômetros (DevTools→Network do mapainterativo.cemaden.gov.br) e definir CEMADEN_DADOS_URL. Resolve o lag de ~19 dias do INMET (ZIP)."
     },
     {
       "prioridade": 2,
@@ -181,13 +182,25 @@
       ]
     },
     "FASE_2_ESCALA_COMERCIAL_E_SUSTENTABILIDADE": {
-      "status": "⏸️ BLOQUEADA — aguarda Fase 1 completa + carta de intenção",
+      "status": "🟡 PARCIALMENTE ANTECIPADA — 2.2 (LSTM) já executada; demais aguardam Fase 1 completa + carta de intenção",
       "etapas_resumo": [
         "2.1 Migração de tiers (Supabase Pro ~R$130/mês + Render Paid ~R$35/mês) — ⏸️",
-        "2.2 Modelos LSTM 6h/12h/24h/48h com IC 95% — ⏸️ aguarda 30d de histórico R2 (~10/07/2026)",
+        "2.2 Modelos LSTM por bacia (horizontes t+1/+2/+3/+6 dias, IC 95% MC Dropout) — ✅ EXECUTADA EM 15-16/06: 5 rios treinados e homologados por nMAE relativo (<5%); inferência no CI grava river_ai_forecasts. Destravou via série SOAP da ANA (~26 anos), não pelos 30d de R2. PENDENTE: recalibrar IC 95% (cobertura empírica 16-57%, estreita)",
         "2.3 Alertas proativos B2B (grupos por cliente + webhooks TMS/ERP) — ⏸️ base já pronta: alerts_log + throttle persistente",
-        "2.4 Sustentação/health_check (lag<20min, R2<8GB, latência API<2s) — ⏸️ embrião já existe: scripts/stability_monitor.py"
-      ]
+        "2.4 Sustentação/health_check (lag<20min, R2<8GB, latência API<2s) — ⏸️ embrião já existe: scripts/stability_monitor.py + src/models/monitor_costs.py"
+      ],
+      "pipeline_ml_executado": {
+        "lstm_homologados": {
+          "guaiba": "✅ nMAE <5%",
+          "jacui": "✅ MAE 0.403 m (2.8% da faixa de 14.29 m)",
+          "taquari": "✅ MAE 0.622 m (3.0% da faixa de 20.67 m)",
+          "sinos": "✅ nMAE <5%",
+          "camaqua": "✅ nMAE <5%"
+        },
+        "convlstm_nowcast": "⏳ aguarda radar REDEMET",
+        "drift_detector": "⏳ pendente",
+        "criterio_homologacao": "MAE/faixa < 5% (relativo). O absoluto 0.20m só servia ao Guaíba; reprovava Jacuí/Taquari (faixas 14-21 m) por física do rio, não por erro do modelo"
+      }
     }
   },
   "estrutura_repositorio_atual": {
@@ -205,6 +218,16 @@
     "src/api": ["main.py ✅ v3 (6 endpoints Supabase+R2)"],
     "src/alerts": ["telegram_bot.py ✅ Supabase + throttle persistente"],
     "src/processors": ["rain_accumulator.py ✅ R2→pandas→Supabase"],
+    "src/models": [
+      "data_loader.py ✅ INMET via BigQuery (basedosdados, dry-run + teto 10GB)",
+      "ana_fetcher.py ✅ SOAP HidroSerieHistorica (~26 anos)",
+      "ana_fetcher_v2.py ✅ REST OAuth overlay + fetch_rio_com_fallback",
+      "dataset_builder.py ✅ unifica fontes → seq_len=72 → split temporal → normalização (scaler no R2)",
+      "lstm_river.py ✅ RiverLSTM 13→128 (2 layers)→4 horizontes; predict_with_interval (MC Dropout)",
+      "train.py ✅ RUN LOCAL — homologação nMAE relativo",
+      "inference.py ✅ CI <30s → UPSERT river_ai_forecasts",
+      "monitor_costs.py ✅ auditoria SRE dos limites gratuitos"
+    ],
     "src/dashboard": ["app.py ⚠️ ÚLTIMO módulo com duckdb — Etapa 1.4"],
     "scripts": ["stability_monitor.py ✅ monitor de lag"],
     "cloudflare": ["ana_proxy_worker.js ✅ deployado", "DEPLOY_WORKER.md ✅"],

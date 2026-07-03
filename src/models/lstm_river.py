@@ -171,23 +171,33 @@ def save_model(
     if s3 is None or not bucket:
         raise RuntimeError("R2 não configurado — modelo não pode ser salvo.")
 
-    payload = {
-        "state_dict": model.state_dict(),
-        "metadata": {
-            "rio_alvo":   rio_alvo,
-            "version":    version,
-            "salvo_em":   datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            "metrics":    metrics,
-            "hparams":    model.hparams,
-            "features":   _FEATURE_COLS,
-            "horizontes_dias": [1, 2, 3, 6],
-        },
+    metadata = {
+        "rio_alvo":   rio_alvo,
+        "version":    version,
+        "salvo_em":   datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "metrics":    metrics,
+        "hparams":    model.hparams,
+        "features":   _FEATURE_COLS,
+        "horizontes_dias": [1, 2, 3, 6],
     }
+    payload = {"state_dict": model.state_dict(), "metadata": metadata}
     buf = io.BytesIO()
     torch.save(payload, buf)
     key = f"models/{rio_alvo}_lstm_{version}.pt"
     s3.put_object(Bucket=bucket, Key=key, Body=buf.getvalue())
     logger.success(f"R2 upload: {key} ({buf.tell() / 1024**2:.1f} MB) | metrics={metrics}")
+
+    # Sidecar JSON leve — permite à API (sem torch) ler os metadados de
+    # transparência via GET /api/v3/forecasts/model-info.
+    import json
+
+    meta_key = f"models/{rio_alvo}_meta.json"
+    s3.put_object(
+        Bucket=bucket, Key=meta_key,
+        Body=json.dumps(metadata, ensure_ascii=False).encode("utf-8"),
+        ContentType="application/json",
+    )
+    logger.info(f"R2 upload: {meta_key} (sidecar de metadados)")
 
 
 def load_model(rio_alvo: str, version: str, device: str = "cpu") -> RiverLSTM:

@@ -54,7 +54,7 @@ Copy-Item "CLAUDE.md"         -Destination "."
 Copy-Item "requirements.txt"  -Destination "."
 Copy-Item ".env.example"      -Destination "."
 Copy-Item ".gitignore"        -Destination "."
-Copy-Item "config.yaml"       -Destination "config\"
+# config.yaml canônico já vive em config\config.yaml (fonte única).
 
 ━━━ BLOCO 4: Criar .env a partir do exemplo ━━━━━━━━━━━━━━
 
