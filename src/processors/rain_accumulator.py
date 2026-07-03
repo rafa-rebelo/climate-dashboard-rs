@@ -181,12 +181,13 @@ def compute_rain_accumulated(df: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 def upsert_accumulated_supabase(df_acc: pd.DataFrame) -> int:
-    """Grava precip_1h/6h/24h em live_rain_readings via UPDATE em lote.
+    """Grava as 8 janelas (1h/3h/6h/12h/24h/48h/72h/7d) em live_rain_readings.
 
     UPDATE puro (não INSERT…ON CONFLICT): a linha da estação já existe
     com "timestamp" NOT NULL gravado pelo inmet_collector — acumulado só
     faz sentido para estação existente, e o caminho INSERT violaria a
-    constraint de timestamp nulo.
+    constraint de timestamp nulo. As colunas precip_3h/12h/48h/72h/7d são
+    adicionadas pelo schema (ADD COLUMN IF NOT EXISTS).
 
     Args:
         df_acc: Saída de compute_rain_accumulated().
@@ -208,9 +209,9 @@ def upsert_accumulated_supabase(df_acc: pd.DataFrame) -> int:
     rows = [
         (
             str(r["station_id"]),
-            float(r["rain_1h"]),
-            float(r["rain_6h"]),
-            float(r["rain_24h"]),
+            float(r["rain_1h"]), float(r["rain_3h"]), float(r["rain_6h"]),
+            float(r["rain_12h"]), float(r["rain_24h"]), float(r["rain_48h"]),
+            float(r["rain_72h"]), float(r["rain_7d"]),
         )
         for _, r in df_acc.iterrows()
     ]
@@ -219,16 +220,21 @@ def upsert_accumulated_supabase(df_acc: pd.DataFrame) -> int:
             psycopg2.extras.execute_values(cur, """
                 UPDATE live_rain_readings AS l
                 SET precip_1h  = v.p1,
+                    precip_3h  = v.p3,
                     precip_6h  = v.p6,
+                    precip_12h = v.p12,
                     precip_24h = v.p24,
+                    precip_48h = v.p48,
+                    precip_72h = v.p72,
+                    precip_7d  = v.p7d,
                     updated_at = NOW()
-                FROM (VALUES %s) AS v(station_id, p1, p6, p24)
+                FROM (VALUES %s) AS v(station_id, p1, p3, p6, p12, p24, p48, p72, p7d)
                 WHERE l.station_id = v.station_id
             """, rows, page_size=200)
             atualizadas = cur.rowcount
         conn.commit()
         logger.success(
-            f"  PG live_rain_readings: acumulados de {atualizadas} estações."
+            f"  PG live_rain_readings: 8 janelas de {atualizadas} estações."
         )
         return int(atualizadas)
     except psycopg2.Error as exc:

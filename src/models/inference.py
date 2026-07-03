@@ -312,6 +312,42 @@ def save_forecast(resultado: dict, rio: str = "guaiba") -> bool:
 # Main com guards
 # ---------------------------------------------------------------------------
 
+_RIOS_CONHECIDOS = ["guaiba", "jacui", "taquari", "sinos", "camaqua"]
+
+
+def _descobrir_rios() -> list[str]:
+    """Lista os rios com modelo treinado no R2 (models/{rio}_lstm_{versao}.pt).
+
+    Evita cravar a lista no código: roda a inferência para todo modelo que
+    realmente existe no bucket. Se o R2 não responder, cai para a lista
+    conhecida (rios ausentes viram status='pendente' sem quebrar o pipeline).
+
+    Returns:
+        Slugs de rios com .pt presente no R2, ou _RIOS_CONHECIDOS como fallback.
+    """
+    s3 = _r2_client()
+    bucket = os.getenv("R2_BUCKET_NAME", "")
+    if s3 is None or not bucket:
+        return _RIOS_CONHECIDOS
+    try:
+        resp = s3.list_objects_v2(Bucket=bucket, Prefix="models/")
+    except Exception as exc:  # noqa: BLE001 — falha de listagem não derruba inferência
+        logger.warning(f"Listagem de modelos no R2 falhou ({exc}); usando lista conhecida.")
+        return _RIOS_CONHECIDOS
+
+    sufixo = f"_lstm_{_MODELO_VERSAO}.pt"
+    rios = sorted({
+        os.path.basename(obj["Key"])[: -len(sufixo)]
+        for obj in resp.get("Contents", [])
+        if obj["Key"].endswith(sufixo)
+    })
+    if not rios:
+        logger.warning("Nenhum modelo encontrado no R2; usando lista conhecida.")
+        return _RIOS_CONHECIDOS
+    logger.info(f"Modelos descobertos no R2: {rios}")
+    return rios
+
+
 def main() -> int:
     """Pipeline de inferência para todos os rios com modelo treinado.
 
@@ -319,8 +355,7 @@ def main() -> int:
         0 em sucesso (mesmo com pendências); 1 se o Supabase falhar.
     """
     t0 = time.monotonic()
-    # Rios com modelo treinado — só guaiba por ora; expandir conforme treino.
-    rios = ["guaiba"]
+    rios = _descobrir_rios()
 
     falha_db = False
     for rio in rios:

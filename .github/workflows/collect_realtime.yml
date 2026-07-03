@@ -29,6 +29,10 @@ jobs:
       CF_WORKER_URL:                ${{ secrets.CF_WORKER_URL }}
       ANA_IDENTIFICADOR:            ${{ secrets.ANA_IDENTIFICADOR }}
       ANA_SENHA:                    ${{ secrets.ANA_SENHA }}
+      # CEMADEN é dado ABERTO (sem login). URL JSON da camada de pluviômetros
+      # do mapa interativo — configurável por secret/variable para não acoplar
+      # o código a uma rota interna que pode mudar.
+      CEMADEN_DADOS_URL:            ${{ secrets.CEMADEN_DADOS_URL }}
       NASA_USER:                    ${{ secrets.NASA_USER }}
       NASA_PASS:                    ${{ secrets.NASA_PASS }}
       TELEGRAM_TOKEN:               ${{ secrets.TELEGRAM_TOKEN }}
@@ -56,6 +60,12 @@ jobs:
       - name: Coletar estações e chuva (INMET)
         continue-on-error: true
         run: python src/collectors/inmet_collector.py --mode=historico --dias=30
+
+      # CEMADEN: pluviômetros automáticos (~10 min, sem geo-bloqueio) — chuva
+      # observada realmente atual, contornando o lag do ZIP do INMET.
+      - name: Coletar pluviômetros CEMADEN (tempo real)
+        continue-on-error: true
+        run: python src/collectors/cemaden_collector.py
 
       # gpm_collector usa earthaccess.login(strategy="netrc") — sem este arquivo
       # o login NASA falha e o coletor cai no fallback CHIRPS (lag de 5-7 semanas)

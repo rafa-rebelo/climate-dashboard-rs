@@ -471,6 +471,24 @@ class HybridWriter:
             result.duration_s = time.monotonic() - t0
             return result
 
+        # live_river_levels tem PK = rio_id (snapshot 1 linha/rio). O
+        # ana_collector envia 1 linha POR ESTAÇÃO e vários rios têm várias
+        # estações (Sinos 3, Jacuí 3, Guaíba 2) → o mesmo slug apareceria N vezes
+        # e o Postgres recusa ("ON CONFLICT DO UPDATE command cannot affect row a
+        # second time"), zerando percentual_cota/status. Deduplica para o PG
+        # mantendo a leitura MAIS CRÍTICA (maior % da cota de alerta) — postura
+        # conservadora para EWS. O R2 (Fluxo B) segue recebendo o df completo.
+        df_db = df.copy()
+        df_db["_slug"] = df_db.apply(
+            lambda r: _rio_slug(
+                r.get("rio_nome") or r.get("river") or r.get("station_code") or ""
+            ),
+            axis=1,
+        )
+        if "pct_cota_alerta" in df_db.columns:
+            df_db = df_db.sort_values("pct_cota_alerta", na_position="first")
+        df_db = df_db.drop_duplicates(subset="_slug", keep="last")
+
         conn = _pg_connect()
         if conn is not None:
             try:
@@ -496,7 +514,7 @@ class HybridWriter:
                         float(r["pct_cota_alerta"]) if pd.notna(r.get("pct_cota_alerta")) else None,
                         datetime.now(tz=timezone.utc),
                     )
-                    for _, r in df.iterrows()
+                    for _, r in df_db.iterrows()
                 ]
                 with conn.cursor() as cur:
                     psycopg2.extras.execute_values(cur, """
@@ -815,12 +833,13 @@ class HybridWriter:
         self,
         df: pd.DataFrame,
         path: Any = None,   # ignorado
+        r2_fonte: str = "live_rain_readings",
     ) -> WriteResult:
         """Persiste leituras brutas de chuva/meteorologia INMET.
 
         PG: INSERT ON CONFLICT DO NOTHING em ``live_rain_readings``
         (PK: station_id, timestamp).
-        R2: ``historico/live_rain_readings/…``
+        R2: ``historico/{r2_fonte}/…``
 
         Mapeamento de colunas INMET → Supabase:
           ts          → timestamp
@@ -833,6 +852,12 @@ class HybridWriter:
             df: DataFrame INMET com station_id, ts, rain_1h_mm,
                 temperature, humidity, pressure_hpa, wind_speed, wind_dir.
             path: Ignorado (sem arquivo local).
+            r2_fonte: Prefixo Hive do Parquet no R2 (Fluxo B). O PG (Fluxo A)
+                grava SEMPRE em ``live_rain_readings``; só o particionamento do
+                R2 muda. Coletores de cadência distinta (ex.: CEMADEN ~10 min)
+                usam um prefixo próprio (``live_rain_cemaden``) para não colidir
+                com a série de 30 dias do INMET, que o rain_accumulator consome
+                pegando o Parquet MAIS RECENTE do prefixo.
 
         Returns:
             WriteResult com estatísticas.
@@ -902,7 +927,7 @@ class HybridWriter:
 
         s3 = _r2_client()
         if s3 is not None:
-            _r2_upload(df, "live_rain_readings", result, s3)
+            _r2_upload(df, r2_fonte, result, s3)
 
         result.duration_s = time.monotonic() - t0
         result.log_summary()

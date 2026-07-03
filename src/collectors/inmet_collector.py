@@ -75,6 +75,42 @@ _INV_PARQUET = _PARQUET_DIR / "inmet_stations_rs.parquet"
 _HIST_PARQUET = _PARQUET_DIR / "inmet_historico_rs.parquet"
 _CACHE_TTL_S = 600   # 10 minutos
 _DB_PATH     = Path(os.getenv("DB_PATH", str(_ROOT / "data" / "climate.duckdb")))
+# Inventário oficial INMET RS (situação Operante/Pane) — fonte: portal INMET,
+# atualizado 03/07/2026. Usado para marcar ativa=false nas estações em Pane
+# (o ZIP histórico segue publicando os CSVs de estações quebradas).
+_INV_OFICIAL_CSV = _ROOT / "config" / "inmet_stations_rs.csv"
+
+
+def _aplicar_situacao_oficial(df_stations: "pd.DataFrame") -> "pd.DataFrame":
+    """Marca active=False nas estações em Pane conforme o inventário oficial.
+
+    Faz merge por station_id com config/inmet_stations_rs.csv (situação
+    Operante/Pane do portal INMET). Estações fora do inventário mantêm
+    active=True (default do write_stations). Best-effort: sem o CSV, o
+    DataFrame volta intocado.
+
+    Args:
+        df_stations: Inventário montado a partir do ZIP (station_id, name, …).
+
+    Returns:
+        Mesmo DataFrame com a coluna active preenchida pela situação oficial.
+    """
+    if df_stations.empty or not _INV_OFICIAL_CSV.exists():
+        return df_stations
+    try:
+        inv = pd.read_csv(_INV_OFICIAL_CSV, dtype={"station_id": str})
+    except (OSError, ValueError) as exc:
+        logger.warning(f"  Inventário oficial ilegível ({exc}) — situação ignorada.")
+        return df_stations
+    situacao = dict(zip(inv["station_id"].str.strip(), inv["situacao"].str.strip()))
+    df = df_stations.copy()
+    df["active"] = df["station_id"].astype(str).map(
+        lambda s: situacao.get(s, "Operante") != "Pane"
+    )
+    n_pane = int((~df["active"]).sum())
+    if n_pane:
+        logger.info(f"  Situação oficial INMET: {n_pane} estações em Pane → ativa=false")
+    return df
 
 
 # ---------------------------------------------------------------------------
@@ -931,9 +967,10 @@ def collect_historico_rs(
         f"{skip} pulados | {err} erros"
     )
 
-    # Consolida estações
+    # Consolida estações + situação oficial (Operante/Pane) do inventário
     df_stations = pd.DataFrame(stations_meta).drop_duplicates("station_id") \
         if stations_meta else pd.DataFrame()
+    df_stations = _aplicar_situacao_oficial(df_stations)
 
     # Consolida leituras
     if not all_frames:

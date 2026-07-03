@@ -26,13 +26,26 @@ ALTER TABLE stations DISABLE ROW LEVEL SECURITY;
 CREATE TABLE IF NOT EXISTS live_rain_readings (
     station_id  TEXT PRIMARY KEY,
     precip_1h   DOUBLE PRECISION,
+    precip_3h   DOUBLE PRECISION,
     precip_6h   DOUBLE PRECISION,
+    precip_12h  DOUBLE PRECISION,
     precip_24h  DOUBLE PRECISION,
+    precip_48h  DOUBLE PRECISION,
+    precip_72h  DOUBLE PRECISION,
+    precip_7d   DOUBLE PRECISION,
     temperatura DOUBLE PRECISION,
     umidade     DOUBLE PRECISION,
     "timestamp" TIMESTAMPTZ,
     updated_at  TIMESTAMPTZ DEFAULT NOW()
 );
+-- Janelas de acumulado adicionadas após a criação original (idempotente):
+-- as 8 já eram calculadas pelo rain_accumulator e gravadas no R2; agora também
+-- na camada quente para a API expor sem ler Parquet a cada request.
+ALTER TABLE live_rain_readings ADD COLUMN IF NOT EXISTS precip_3h  DOUBLE PRECISION;
+ALTER TABLE live_rain_readings ADD COLUMN IF NOT EXISTS precip_12h DOUBLE PRECISION;
+ALTER TABLE live_rain_readings ADD COLUMN IF NOT EXISTS precip_48h DOUBLE PRECISION;
+ALTER TABLE live_rain_readings ADD COLUMN IF NOT EXISTS precip_72h DOUBLE PRECISION;
+ALTER TABLE live_rain_readings ADD COLUMN IF NOT EXISTS precip_7d  DOUBLE PRECISION;
 ALTER TABLE live_rain_readings DISABLE ROW LEVEL SECURITY;
 
 -- ── live_river_levels — snapshot 1 linha/rio ─────────────────

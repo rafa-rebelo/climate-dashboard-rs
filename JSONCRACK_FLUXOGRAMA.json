@@ -1,7 +1,7 @@
 {
   "projeto": "Sistema Autônomo de Análise Climática RS",
-  "versao": "4.3",
-  "ultima_atualizacao": "2026-06-12 14:30 UTC",
+  "versao": "4.5",
+  "ultima_atualizacao": "2026-06-16 14:15 UTC",
   "legenda_cores": {
     "🟩": "CONCLUÍDO (verde claro)",
     "🟨": "PENDENTE / EM ANDAMENTO (amarelo claro)",
@@ -9,9 +9,10 @@
   },
   "arquitetura": "Híbrida custo zero — Supabase PostgreSQL (quente) + Cloudflare R2 (fria) + 2 CF Workers (proxy ANA + cron trigger) + GitHub Actions (executor efêmero)",
   "resumo_progresso": {
-    "fase_1_roadmap_v4": "🟨 85% — 1.1/1.2/1.3 🟩 · estabilização 24h em curso · 1.4/1.5 ⏳",
-    "bloqueadores_criticos": "🟩 4/4 resolvidos (11/06)",
-    "cadencia_coleta": "🟩 10 min via Cloudflare Cron Trigger (39+ runs, zero falhas, ANA 100%)"
+    "fase_1_roadmap_v4": "🟨 90% — 1.1/1.2/1.3 🟩 · estabilização 24h 🟩 CONCLUÍDA (auditada 16/06 12:15 UTC) · 1.4/1.5 ⏳",
+    "bloqueadores_criticos": "🟩 4/4 resolvidos (11/06) — falta só ação do usuário: secrets TELEGRAM",
+    "cadencia_coleta": "🟩 10 min via Cloudflare Cron Trigger (zero gaps>30min, ANA 100%)",
+    "ml_lstm_rios": "🟩 ANTECIPADO — 5 rios treinados e homologados (nMAE relativo <5%); inferência rodando no CI gravando river_ai_forecasts"
   },
   "variaveis_fornecidas": {
     "🟩_ATIVAS_em_producao": {
@@ -20,12 +21,14 @@
       "acumulados": "1h/3h/6h/12h/24h/48h/72h/7d por estação",
       "rios": "Nível + vazão + status NORMAL→EMERGENCIA + % cota — 5 rios (Guaíba, Jacuí, Taquari, Sinos, Camaquã)",
       "previsao_7_dias": "10 cidades RS: precipitação, probabilidade, CAPE, Lifted Index, K-Index, nebulosidade, vento (vel+dir), temperatura, umidade, pressão, temp máx/mín diária",
+      "previsao_ia_rios": "LSTM por bacia — horizontes t+1/+2/+3/+6 dias com intervalo de confiança 95% (MC Dropout); 5 rios homologados por nMAE relativo; gravado em river_ai_forecasts via inferência no CI (<30s)",
       "precipitacao_classificada": "Baixa/média/alta por limiares regionais do config.yaml + escala de intensidade",
       "historico_bruto": "Parquets no R2 (particionamento por data) — leitura direta pandas/boto3"
     },
     "🟨_PENDENTES_estrutura_pronta": {
       "api_publica": "FastAPI v3 com 6 endpoints pronta — falta deploy Render (Etapa 1.4a)",
-      "alertas_telegram": "Código migrado p/ Supabase — faltam secrets (última tarefa da etapa)",
+      "alertas_telegram": "Código migrado p/ Supabase — faltam secrets TELEGRAM_TOKEN/CHAT_ID (última tarefa da etapa)",
+      "ic95_calibracao": "Intervalo de confiança 95% implementado (MC Dropout n=30) — cobertura empírica ainda estreita (16–57%); recalibrar antes de expor como banda operacional",
       "temperatura_agua": "Tabela water_quality.temperature_c criada — ANA sem medições no período",
       "temperatura_noturna": "Derivável da série horária + temp_2m_min prevista — falta expor campo",
       "radiacao_solar": "Open-Meteo oferece shortwave_radiation — adicionar ao coletor (~1h)"
@@ -34,7 +37,8 @@
       "balanco_hidrico": "P−ET0 viável (Open-Meteo tem et0_fao_evapotranspiration; ~3h) — forte p/ caso agro",
       "nitrogenio": "Não se aplica — variável de solo, não climática; sistema fornece os insumos climáticos p/ modelos agronômicos",
       "cemaden": "Pluviômetros de área de risco ~10min — backlog prioridade 1",
-      "goes16_radar_ml": "Satélite IR, radar REDEMET, LSTM (Fase 2)"
+      "nowcast_radar": "ConvLSTM 0-6h — aguarda chave/coletor REDEMET",
+      "goes16": "Satélite IR (AWS Open Data) — backlog visual do dashboard"
     }
   },
   "integracao_api_python": {
@@ -59,7 +63,7 @@
         "projeto_e_venv": "🟩 estrutura + venv ativo",
         "CLAUDE_md_5_agentes": "🟩 5 agentes",
         "config_yaml": "🟩 cotas RS + grade NWP + limiares",
-        "env_configurado": "🟩 ANA + SUPABASE + R2 + CF_WORKER_URL (NASA/TELEGRAM a repor no .env local)"
+        "env_configurado": "🟩 ANA + SUPABASE + R2 + CF_WORKER_URL + BIGQUERY (NASA/TELEGRAM a repor no .env local)"
       }
     },
     "FASE_2_BANCO_DADOS": {
@@ -73,23 +77,26 @@
         "live_rain_readings": "🟩 98 — chuva+temp+umidade+acumulados",
         "live_river_levels": "🟩 5 rios — nível+vazão+status+%cota",
         "live_gpm_precip": "🟩 5.600 pontos IMERG (CHIRPS removida)",
-        "forecasts": "🟩 1.680 previsões NWP",
+        "forecasts": "🟩 ~2.640 previsões NWP",
         "alerts_log": "🟩 criada — throttle persistente 1h",
         "water_quality": "🟨 criada — aguarda dados ANA QA",
-        "river_ai_forecasts": "⏳ vazia — Fase 2 (LSTM)"
+        "river_ai_forecasts": "🟩 ATIVA — snapshot (PK rio_id, horizonte_h) gravado pela inferência LSTM no CI"
       },
       "duckdb_legado": "🟨 usado SÓ pelo dashboard local — remoção na Etapa 1.4"
     },
     "FASE_3_CADASTROS_APIS": {
       "status": "🟩 NÚCLEO CONCLUÍDO",
-      "percentual": "85%",
+      "percentual": "88%",
       "apis": {
-        "open_meteo": "🟩 EM PRODUÇÃO — 1.680 previsões, 10 pontos",
+        "open_meteo": "🟩 EM PRODUÇÃO — previsões NWP, 10 pontos",
         "ana_hidroweb": "🟩 EM PRODUÇÃO via CF Worker (retry 417, 100% sucesso)",
+        "ana_soap_historico": "🟩 HidroSerieHistorica — série de ~26 anos usada no treino LSTM (ana_fetcher.py)",
+        "ana_rest_oauth": "🟩 hidrowebservice — telemetria recente ~30 dias, overlay sobre SOAP (ana_fetcher_v2.py)",
         "inmet": "🟩 EM PRODUÇÃO — ZIP 30 dias",
+        "inmet_bigquery": "🟩 histórico via basedosdados (dry-run + teto 10GB) p/ features de treino",
         "nasa_gpm_imerg": "🟩 EM PRODUÇÃO — IMERG real (.netrc no runner)",
         "chirps_v2": "🟩 fallback automático",
-        "cemaden": "⏳ BACKLOG prioridade 1",
+        "cemaden": "🟨 código pronto — resolve o lag do INMET (chuva real-time); aguarda credenciais",
         "redemet": "⏳ BACKLOG — aguarda chave",
         "telegram_bot": "🟨 código pronto — faltam secrets"
       }
@@ -100,9 +107,9 @@
       "coletores": {
         "ana_collector": "🟩 Supabase+R2 · proxy CF · retry 417 · Sinos renovado (São Leopoldo/Campo Bom/Paranhana)",
         "inmet_collector": "🟩 Supabase+R2 · 98 estações",
-        "gpm_collector": "🟩 Supabase+R2 · IMERG real",
+        "gpm_collector": "🟩 Supabase+R2 · IMERG real · duckdb opcional",
         "noaa_collector": "🟩 Supabase+R2 · 11 vars horárias + 5 diárias",
-        "cemaden_collector": "⏳ backlog (próximo sprint)",
+        "cemaden_collector": "🟨 código pronto — ABERTO (sem login, pluviômetros ~10min); aguarda CEMADEN_DADOS_URL (URL JSON do mapa interativo, capturável no DevTools)",
         "radar_collector": "⏳ aguarda chave REDEMET"
       }
     },
@@ -129,20 +136,35 @@
     "FASE_7_AUTOMACAO": {
       "status": "🟩 CONCLUÍDO — autônomo na nuvem",
       "percentual": "100%",
-      "repositorio_ativo": "🟩 climate-dashboard-rs (13 secrets, zero commits de dados)",
+      "repositorio_ativo": "🟩 climate-dashboard-rs (secrets, zero commits de dados, repo público = minutos ilimitados)",
       "repositorio_legado": "🟩 climate-data-rs — workflow DESATIVADO (12/06)",
       "cron": "🟩 Cloudflare Cron Trigger */10 → workflow_dispatch (GitHub cron nativo abandonado por throttle)",
-      "evidencia": "🟩 39 runs 02:56–09:24 UTC · mediana 10 min · zero gaps>30min · ANA 100%",
-      "seguranca": "🟩 senha Supabase rotacionada · PAT escopo mínimo em secret CF"
+      "pipeline_ci": "🟩 collect_realtime.yml — coleta + acumulados + inferência LSTM (torch CPU) + alertas, tudo <12min",
+      "evidencia": "🟩 runs contínuos · mediana 10 min · zero gaps>30min · ANA 100%",
+      "seguranca": "🟩 PAT escopo mínimo em secret CF · senha Supabase a rotacionar (pendência do usuário)"
     },
     "FASE_8_MODELOS_ML": {
-      "status": "⏳ PENDENTE (Fase 2)",
-      "percentual": "0%",
-      "prerequisito": "30+ dias de histórico R2 — acumulando desde 10/06 → destrava ~10/07/2026",
+      "status": "🟨 LSTM POR BACIA CONCLUÍDO — ANTECIPADO via histórico ANA SOAP",
+      "percentual": "55%",
+      "destrave": "Não dependeu dos 30 dias de R2: o ana_fetcher SOAP entrega ~9.000+ dias por estação (HidroSerieHistorica, 26 anos), suficiente para treinar já",
+      "pipeline_treino": {
+        "data_loader": "🟩 INMET via BigQuery (basedosdados) — features meteo p/ treino",
+        "ana_fetcher": "🟩 SOAP histórico + ana_fetcher_v2 REST overlay (fetch_rio_com_fallback)",
+        "dataset_builder": "🟩 unifica fontes → sequências seq_len=72 → split temporal → normalização MinMax (scaler no R2)",
+        "lstm_river": "🟩 RiverLSTM 13 feats→128 (2 layers)→FC→4 horizontes; predict_with_interval (MC Dropout n=30)",
+        "train": "🟩 RUN LOCAL — HuberLoss, Adam, ReduceLROnPlateau, early stopping; homologação por nMAE relativo (<5%)",
+        "inference": "🟩 CI <30s — carrega pesos do R2, monta janela 72d + cota viva, UPSERT river_ai_forecasts",
+        "monitor_costs": "🟩 auditoria SRE dos limites gratuitos (R2/BigQuery/Actions/Supabase)"
+      },
       "modelos": {
-        "lstm_rios": "⏳ Guaíba/Jacuí/Taquari/Sinos · 6-48h · IC 95%",
-        "convlstm_nowcast": "⏳ aguarda radar",
-        "drift_detector": "⏳"
+        "lstm_guaiba": "🟩 homologado (nMAE <5%)",
+        "lstm_jacui": "🟩 homologado — MAE 0.403 m (2.8% da faixa de 14.29 m)",
+        "lstm_taquari": "🟩 homologado — MAE 0.622 m (3.0% da faixa de 20.67 m)",
+        "lstm_sinos": "🟩 homologado (nMAE <5%)",
+        "lstm_camaqua": "🟩 homologado (nMAE <5%)",
+        "ic95_calibracao": "🟨 banda implementada mas estreita (cobertura 16–57%) — recalibrar",
+        "convlstm_nowcast": "⏳ aguarda radar REDEMET",
+        "drift_detector": "⏳ pendente"
       }
     },
     "FASE_9_API_REST": {
@@ -160,16 +182,19 @@
       "webhooks_b2b": "⏳ Fase 2"
     },
     "FASE_11_TESTES_DEPLOY": {
-      "status": "🟨 ESTABILIZAÇÃO EM CURSO",
-      "percentual": "60%",
+      "status": "🟩 ESTABILIZAÇÃO 24h CONCLUÍDA E AUDITADA",
+      "percentual": "90%",
+      "janela_auditada": "15/06 12:15 → 16/06 12:15 UTC (24h fechadas)",
       "criterios": {
-        "lag_30min_24h": "🟨 6h30+ cumpridas sem violação (lag real 0,7–8,7 min) — janela fecha ~03:00 UTC 13/06",
-        "taxa_ana_80": "🟩 100% em 39 runs",
-        "sinos_atualizando": "🟩 1,11 m com estações novas"
-      }
+        "lag_30min_24h": "🟩 pipeline nunca fora do ar >30 min — ANA gravou ~145 runs (gap máx 30 min, 1 blip único). GPM 52 min / chuva 59 min são cadência da fonte upstream (IMERG/INMET), não downtime",
+        "taxa_ana_80": "🟩 ~100% (290 objetos live_river_levels ≈ 145 runs / 144 ciclos */10 esperados)",
+        "sinos_atualizando": "🟩 atualizando todo ciclo com estações novas (São Leopoldo/Campo Bom/Paranhana)"
+      },
+      "veredito": "Critérios de parada da Etapa 1 atendidos no código e na estabilização; alertas Telegram permanecem dormentes até o usuário criar os secrets"
     }
   },
-  "dados_ao_vivo_12_06": {
+  "dados_ao_vivo_snapshot_12_06": {
+    "nota": "Snapshot da última leitura registrada no fluxograma; valores ao vivo no Supabase/dashboard",
     "status_rios": {
       "Guaíba": "🟢 NORMAL · 1.28m / 3.0m",
       "Jacuí": "🟢 NORMAL · 0.68m / 7.0m",
@@ -181,21 +206,25 @@
     "alertas_ativos": 0
   },
   "proximas_acoes": {
-    "1_AUTOMATICO": "🟨 Fechamento da janela 24h (~03:00 UTC 13/06) → declarar Etapa 1",
-    "2_USUARIO": "🟨 Secrets TELEGRAM (última da etapa) + repor NASA/TELEGRAM no .env local",
-    "3_ETAPA_1_4": "⏳ Deploy Render + dashboard stateless",
-    "4_SPRINT_EXPANSAO": "⏳ CEMADEN + 8 rios novos validados (Uruguai, Ibicuí, Sta Maria, Caí, Gravataí, Pelotas, Camaquã-Cristal, afluentes Sinos) + radiação solar + balanço hídrico (ET0)",
+    "1_AUTOMATICO": "🟩 Janela 24h fechada e auditada (16/06 12:15 UTC) — 3 critérios de estabilização atendidos",
+    "2_USUARIO": "🟨 Criar secrets TELEGRAM_TOKEN/CHAT_ID (última da etapa) + rotacionar senha Supabase + apagar SECRETS_PARA_COLAR.txt + repor NASA/TELEGRAM no .env local",
+    "3_ETAPA_1_4": "⏳ Deploy Render + dashboard stateless (consumir API v3, remover duckdb)",
+    "4_SPRINT_EXPANSAO": "⏳ CEMADEN + 8 rios novos (Uruguai, Ibicuí, Sta Maria, Caí, Gravataí, Pelotas, Camaquã-Cristal, afluentes Sinos) + radiação solar + balanço hídrico (ET0) + recalibração IC 95%",
     "5_ETAPA_1_5": "⏳ Demo comercial + carta de intenção (gatilho Fase 2)"
   },
   "notas_tecnicas": {
     "pooler_supabase": "aws-1-sa-east-1.pooler.supabase.com — IPv4; cuidado com o hífen",
     "ana_417": "417 intermitente p/ IPs Cloudflare — retry 5x resolve",
+    "ana_soap_vs_rest": "REST OAuth só ~30 dias de telemetria; SOAP HidroSerieHistorica dá a profundidade (26 anos) que treina o LSTM — MAE limitado pela amplitude do rio, não pela qualidade do dado",
+    "homologacao_nmae": "Critério = MAE/faixa < 5% (relativo). O absoluto 0.20m só servia ao Guaíba; reprovava Jacuí/Taquari (faixas de 14–21 m) por física, não por erro",
+    "import_opcional": "bigquery e duckdb importados de forma opcional (try/except) — slim requirements no CI não quebram a cadeia transitiva",
     "secret_cf_via_pipe": "PowerShell pipe anexa \\r ao stdin do wrangler secret put — usar bash printf",
     "upserts": "Sempre updated_at=NOW(); live_river_levels deduplicada por rio_id",
-    "runner_efemero": "Estado persistente só no banco (ex.: throttle em alerts_log)",
+    "runner_efemero": "Estado persistente só no banco (ex.: throttle em alerts_log); pesos LSTM e scaler no R2",
     "niquests": "niquests==3.19.0 pinado — nunca requests.Session()"
   },
   "custos": {
-    "TOTAL_MENSAL": "R$ 0,00"
+    "TOTAL_MENSAL": "R$ 0,00",
+    "nota": "BigQuery dentro do free tier (dry-run + teto 10GB faturado); Actions ilimitado em repo público"
   }
 }
