@@ -71,6 +71,11 @@ _SGAA_TOKEN_URL = os.getenv(
 _PED_BASE = os.getenv("CEMADEN_PED_BASE", "https://sws.cemaden.gov.br/PED/rest").rstrip("/")
 _EMAIL = os.getenv("CEMADEN_EMAIL", "").strip()
 _SENHA = os.getenv("CEMADEN_PASSWORD", "").strip()
+# rede=11 é a rede pluviométrica CEMADEN (obrigatório na PED; testado 03/07).
+_REDE = os.getenv("CEMADEN_REDE", "11")
+# Catálogo /pcds-tipo-estacao/sensores: tipoestacao=1 Pluviométrica →
+# sensor 10 = "Chuva" (mm por leitura), 240 = "Intensidade da Precipitação".
+_SENSOR_CHUVA = int(os.getenv("CEMADEN_SENSOR_CHUVA", "10"))
 
 # Cache do token em memória (o SGAA devolve timeToExp em ms; renovamos com folga).
 _TOKEN_CACHE: dict[str, Any] = {"token": None, "exp": None}
@@ -166,8 +171,9 @@ def _get_token() -> str:
     if not _EMAIL or not _SENHA:
         raise ValueError("CEMADEN_EMAIL/CEMADEN_PASSWORD ausentes no ambiente.")
 
+    # format=JSON MAIÚSCULO: o SGAA responde 500 com "json" minúsculo (testado).
     resp = _session.post(
-        _SGAA_TOKEN_URL, params={"format": "json"},
+        _SGAA_TOKEN_URL, params={"format": "JSON"},
         json={"email": _EMAIL, "password": _SENHA}, timeout=60,
     )
     if resp.status_code == 400:
@@ -178,10 +184,16 @@ def _get_token() -> str:
     token = data.get("token")
     if not token:
         raise ValueError(f"SGAA sem token na resposta: {str(data)[:120]}")
-    ttl_ms = float(data.get("timeToExp") or 3_600_000)
+    # timeToExp: a doc diz ms, mas na prática vem em SEGUNDOS restantes
+    # (observado: 13673 ≈ 3,8 h; exemplo da doc 604799 ≈ 7 dias). Valores
+    # < 10^7 são tratados como segundos; acima disso, como ms.
+    bruto = float(data.get("timeToExp") or 3600)
+    ttl_s = bruto if bruto < 10_000_000 else bruto / 1000.0
+    # Folga de 10% (mín. 60 s) para nunca usar token na iminência de expirar.
+    folga = max(ttl_s * 0.1, 60.0)
     _TOKEN_CACHE["token"] = token
-    _TOKEN_CACHE["exp"] = agora + timedelta(milliseconds=ttl_ms) - timedelta(hours=1)
-    logger.success(f"Token SGAA obtido (expira em ~{ttl_ms / 3_600_000:.0f} h).")
+    _TOKEN_CACHE["exp"] = agora + timedelta(seconds=max(ttl_s - folga, 30.0))
+    logger.success(f"Token SGAA obtido (expira em ~{ttl_s / 3600:.1f} h).")
     return token
 
 
@@ -205,9 +217,12 @@ def _get_dados_ped() -> list[dict]:
         niquests.exceptions.RequestException: Erro de rede após retries.
     """
     token = _get_token()
+    # Contrato PED (Swagger): token vai no HEADER (query dá "token vazio");
+    # rede é OBRIGATÓRIO (11 = pluviômetros CEMADEN).
     resp = _session.get(
         f"{_PED_BASE}/pcds/pcds-dados-recentes",
-        params={"token": token, "uf": _UF, "formato": "json"},
+        params={"uf": _UF, "rede": _REDE, "formato": "json"},
+        headers={"token": token},
         timeout=120,
     )
     if resp.status_code in (401, 403):
@@ -292,16 +307,20 @@ def fetch_dados_rs() -> pd.DataFrame:
             "datahora":  _pick(d, _F_DH),
             "chuva_mm":  chuva,
             "sensor":    str(_pick(d, _F_SENSOR) or ""),
+            "id_sensor": d.get("id_sensor"),
         })
 
     df = pd.DataFrame(linhas)
     if df.empty:
         return df
 
-    # A PED devolve TODOS os sensores da PCD (chuva, nível, temp...). Se o
-    # feed identifica o sensor, mantém só chuva; sem identificação, mantém
-    # tudo (feeds simples do mapa já são só pluviômetros).
-    if df["sensor"].str.strip().any():
+    # A PED devolve TODOS os sensores da PCD (chuva, intensidade, agro...).
+    # Preferência: id_sensor numérico (10 = Chuva, catálogo oficial); senão
+    # nome do sensor; sem identificação, mantém tudo (feeds simples do mapa
+    # já são só pluviômetros).
+    if df["id_sensor"].notna().any():
+        df = df[pd.to_numeric(df["id_sensor"], errors="coerce") == _SENSOR_CHUVA]
+    elif df["sensor"].str.strip().any():
         chuva_mask = df["sensor"].str.lower().str.contains(
             "chuva|pluv|precip", regex=True, na=False
         )

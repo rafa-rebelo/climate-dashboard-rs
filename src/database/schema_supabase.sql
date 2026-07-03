@@ -8,7 +8,7 @@
 -- RLS desabilitado: escrita via psycopg2 (GitHub Actions / API).
 -- ============================================================
 
--- ── stations — inventário INMET/ANA (PK: station_id) ─────────
+-- ── stations — inventário INMET/ANA/CEMADEN (PK: station_id) ─
 CREATE TABLE IF NOT EXISTS stations (
     station_id  TEXT PRIMARY KEY,
     nome        TEXT,
@@ -21,6 +21,11 @@ CREATE TABLE IF NOT EXISTS stations (
     created_at  TIMESTAMPTZ DEFAULT NOW()
 );
 ALTER TABLE stations DISABLE ROW LEVEL SECURITY;
+-- Fontes aceitas — o check original (INMET/ANA) rejeitava o coletor CEMADEN;
+-- recriado em 03/07/2026 incluindo CEMADEN e REDEMET (idempotente).
+ALTER TABLE stations DROP CONSTRAINT IF EXISTS stations_fonte_check;
+ALTER TABLE stations ADD CONSTRAINT stations_fonte_check
+    CHECK (fonte IN ('INMET', 'ANA', 'CEMADEN', 'REDEMET'));
 
 -- ── live_rain_readings — snapshot 1 linha/estação ────────────
 CREATE TABLE IF NOT EXISTS live_rain_readings (
