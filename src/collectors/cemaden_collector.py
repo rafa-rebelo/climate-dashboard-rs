@@ -11,10 +11,12 @@ Taquari, Vale dos Sinos, Serra) e — confirmado pelo usuário no mapa interativ
 (camadas Pluviometros_Cemaden / Hidrologicas_Cemaden) — os dados são ABERTOS,
 sem login. Este coletor traz chuva observada realmente atual. Custo: R$ 0,00.
 
-Acesso (ABERTO, sem autenticação): um único GET a um endpoint JSON que lista
-as PCDs do RS com a leitura recente. A URL exata é a que o mapa interativo
-chama (capturável no DevTools → aba Network ao abrir a camada de pluviômetros);
-fica em CEMADEN_DADOS_URL (env) para não acoplar o código a uma rota específica.
+Acesso (duas rotas):
+  A. OFICIAL (preferida): API PED (sws.cemaden.gov.br/PED/rest) com token do
+     SGAA (sgaa.cemaden.gov.br) — cadastro gratuito; credenciais nos secrets
+     CEMADEN_EMAIL/CEMADEN_PASSWORD. Endpoint: /pcds/pcds-dados-recentes?uf=RS.
+  B. Fallback: GET aberto na URL JSON do mapa interativo (CEMADEN_DADOS_URL,
+     capturável no DevTools → Network) — rota interna que pode mudar sem aviso.
 
 Persistência (reuso do HybridWriter): write_stations (fonte=CEMADEN) +
 write_rain_readings (UPSERT live_rain_readings + R2 historico/...). Os ids
@@ -25,7 +27,7 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -49,14 +51,29 @@ from database.hybrid_writer import HybridWriter  # noqa: E402
 load_dotenv()
 
 # ---------------------------------------------------------------------------
-# Configuração (endpoint ABERTO — overridável por env)
+# Configuração — duas rotas de acesso
 # ---------------------------------------------------------------------------
+# Rota A (OFICIAL, preferida): API PED com token do SGAA.
+#   1. POST {_SGAA_TOKEN_URL} {"email","password"} → {"token","timeToExp"(ms)}
+#   2. GET  {_PED_BASE}/pcds/pcds-dados-recentes?token=...&uf=RS
+#   Cadastro gratuito no CEMADEN; credenciais em CEMADEN_EMAIL/CEMADEN_PASSWORD.
+#   Swagger: sgaa.cemaden.gov.br/SGAA/api/ui + sws.cemaden.gov.br/PED/api/ui.
+# Rota B (fallback): URL JSON aberta capturada no DevTools do mapa interativo
+#   (CEMADEN_DADOS_URL) — rota interna que pode mudar sem aviso.
 
-# URL aberta que retorna as PCDs do RS com a leitura recente. Sem default
-# fixo: a rota interna do mapa pode mudar, então o operador informa a URL
-# capturada no DevTools (Network) do mapainterativo.cemaden.gov.br.
 _DADOS_URL = os.getenv("CEMADEN_DADOS_URL", "").strip()
 _UF = os.getenv("CEMADEN_UF", "RS")
+
+_SGAA_TOKEN_URL = os.getenv(
+    "CEMADEN_TOKEN_URL",
+    "https://sgaa.cemaden.gov.br/SGAA/rest/controle-token/tokens",
+)
+_PED_BASE = os.getenv("CEMADEN_PED_BASE", "https://sws.cemaden.gov.br/PED/rest").rstrip("/")
+_EMAIL = os.getenv("CEMADEN_EMAIL", "").strip()
+_SENHA = os.getenv("CEMADEN_PASSWORD", "").strip()
+
+# Cache do token em memória (o SGAA devolve timeToExp em ms; renovamos com folga).
+_TOKEN_CACHE: dict[str, Any] = {"token": None, "exp": None}
 
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
@@ -66,7 +83,8 @@ _session.headers.update({"Accept": "application/json, */*", "User-Agent": _UA})
 
 # Variantes de nome de campo aceitas (o CEMADEN mistura camelCase/UPPER/snake).
 _F_COD = ("codEstacao", "COD_ESTACAO", "codestacao", "codibge", "codigo", "cod")
-_F_NOME = ("nomeEstacao", "NOME_ESTACAO", "nome")
+_F_NOME = ("nomeEstacao", "NOME_ESTACAO", "nomeestacao", "nome")
+_F_SENSOR = ("sensor", "sensordescricao", "descricao_sensor", "tiposensor")
 _F_MUN = ("municipio", "MUNICIPIO", "cidade")
 _F_UF = ("uf", "UF", "sigla_uf")
 _F_LAT = ("latitude", "LATITUDE", "lat")
@@ -99,25 +117,18 @@ def _num(v: Any) -> float | None:
 # 1. Busca aberta (sem autenticação)
 # ---------------------------------------------------------------------------
 
-@retry(
-    stop=stop_after_attempt(4),
-    wait=wait_exponential(multiplier=2, min=2, max=30),
-    retry=retry_if_exception_type(niquests.exceptions.RequestException),
-    reraise=True,
-)
-def _get_dados() -> list[dict]:
-    """GET aberto das PCDs/leituras do RS no CEMADEN.
+def _unwrap(data: Any) -> list[dict]:
+    """Desembrulha o JSON do CEMADEN em lista de dicts.
+
+    Aceita lista direta, envelope {"items"/"dados"/...: [...]} e GeoJSON
+    (features com properties/geometry).
+
+    Args:
+        data: JSON já decodificado da resposta.
 
     Returns:
-        Lista de dicts (uma por estação/leitura). Desembrulha respostas
-        no formato {"items"/"dados"/"data"/"features": [...]}.
-
-    Raises:
-        niquests.exceptions.RequestException: Erro de rede após retries.
+        Lista de dicts (uma por estação/leitura); vazia se irreconhecível.
     """
-    resp = _session.get(_DADOS_URL, params={"uf": _UF}, timeout=60)
-    resp.raise_for_status()
-    data = resp.json()
     if isinstance(data, dict):
         for k in ("items", "dados", "data", "result", "features", "estacoes"):
             if isinstance(data.get(k), list):
@@ -128,6 +139,103 @@ def _get_dados() -> list[dict]:
                 return bruto
         return [data]
     return data if isinstance(data, list) else []
+
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=2, min=2, max=20),
+    retry=retry_if_exception_type(niquests.exceptions.RequestException),
+    reraise=True,
+)
+def _get_token() -> str:
+    """Obtém (e cacheia) o token do SGAA via e-mail/senha cadastrados.
+
+    O SGAA devolve o mesmo token enquanto ele estiver ativo (timeToExp em
+    milissegundos, ~7 dias); renovamos com folga de 1 h.
+
+    Returns:
+        Token JWT para o parâmetro ``token`` da API PED.
+
+    Raises:
+        ValueError: Credenciais ausentes/recusadas ou resposta sem token.
+        niquests.exceptions.RequestException: Erro de rede após retries.
+    """
+    agora = datetime.now(timezone.utc)
+    if _TOKEN_CACHE["token"] and _TOKEN_CACHE["exp"] and agora < _TOKEN_CACHE["exp"]:
+        return _TOKEN_CACHE["token"]
+    if not _EMAIL or not _SENHA:
+        raise ValueError("CEMADEN_EMAIL/CEMADEN_PASSWORD ausentes no ambiente.")
+
+    resp = _session.post(
+        _SGAA_TOKEN_URL, params={"format": "json"},
+        json={"email": _EMAIL, "password": _SENHA}, timeout=60,
+    )
+    if resp.status_code == 400:
+        # SGAA responde 400 com [{"Alerta": "..."}] p/ credencial inválida.
+        raise ValueError(f"SGAA recusou as credenciais: {resp.text[:120]}")
+    resp.raise_for_status()
+    data = resp.json()
+    token = data.get("token")
+    if not token:
+        raise ValueError(f"SGAA sem token na resposta: {str(data)[:120]}")
+    ttl_ms = float(data.get("timeToExp") or 3_600_000)
+    _TOKEN_CACHE["token"] = token
+    _TOKEN_CACHE["exp"] = agora + timedelta(milliseconds=ttl_ms) - timedelta(hours=1)
+    logger.success(f"Token SGAA obtido (expira em ~{ttl_ms / 3_600_000:.0f} h).")
+    return token
+
+
+@retry(
+    stop=stop_after_attempt(4),
+    wait=wait_exponential(multiplier=2, min=2, max=30),
+    retry=retry_if_exception_type(niquests.exceptions.RequestException),
+    reraise=True,
+)
+def _get_dados_ped() -> list[dict]:
+    """GET oficial PED: leituras recentes de todas as PCDs da UF.
+
+    Endpoint ``/pcds/pcds-dados-recentes`` (Swagger PED). O token vai como
+    query param, conforme contrato da API.
+
+    Returns:
+        Lista de dicts de leituras recentes.
+
+    Raises:
+        ValueError: Token recusado (401/403) — credencial a revisar.
+        niquests.exceptions.RequestException: Erro de rede após retries.
+    """
+    token = _get_token()
+    resp = _session.get(
+        f"{_PED_BASE}/pcds/pcds-dados-recentes",
+        params={"token": token, "uf": _UF, "formato": "json"},
+        timeout=120,
+    )
+    if resp.status_code in (401, 403):
+        _TOKEN_CACHE["token"] = None   # força renovação no próximo run
+        raise ValueError(f"PED recusou o token (HTTP {resp.status_code}).")
+    resp.raise_for_status()
+    return _unwrap(resp.json())
+
+
+@retry(
+    stop=stop_after_attempt(4),
+    wait=wait_exponential(multiplier=2, min=2, max=30),
+    retry=retry_if_exception_type(niquests.exceptions.RequestException),
+    reraise=True,
+)
+def _get_dados() -> list[dict]:
+    """GET aberto das PCDs/leituras do RS no CEMADEN (rota B, fallback).
+
+    Returns:
+        Lista de dicts (uma por estação/leitura). Desembrulha respostas
+        no formato {"items"/"dados"/"data"/"features": [...]}.
+
+    Raises:
+        niquests.exceptions.RequestException: Erro de rede após retries.
+    """
+    resp = _session.get(_DADOS_URL, params={"uf": _UF}, timeout=60)
+    resp.raise_for_status()
+    return _unwrap(resp.json())
 
 
 def _flatten_feature(feat: dict) -> dict:
@@ -144,11 +252,19 @@ def _flatten_feature(feat: dict) -> dict:
 def fetch_dados_rs() -> pd.DataFrame:
     """Coleta e normaliza as leituras de pluviômetros CEMADEN do RS.
 
+    Rota A (PED oficial com token SGAA) quando CEMADEN_EMAIL/PASSWORD estão
+    definidos; senão rota B (URL aberta CEMADEN_DADOS_URL).
+
     Returns:
         DataFrame normalizado: cod, nome, municipio, uf, lat, lon,
         datahora (UTC), chuva_mm. Vazio se nada retornar.
     """
-    registros = _get_dados()
+    if _EMAIL and _SENHA:
+        logger.info("CEMADEN: rota oficial PED (token SGAA).")
+        registros = _get_dados_ped()
+    else:
+        logger.info("CEMADEN: rota aberta (CEMADEN_DADOS_URL).")
+        registros = _get_dados()
     if not registros:
         logger.warning("CEMADEN: nenhum registro retornado.")
         return pd.DataFrame()
@@ -175,11 +291,22 @@ def fetch_dados_rs() -> pd.DataFrame:
             "lon":       lon,
             "datahora":  _pick(d, _F_DH),
             "chuva_mm":  chuva,
+            "sensor":    str(_pick(d, _F_SENSOR) or ""),
         })
 
     df = pd.DataFrame(linhas)
     if df.empty:
         return df
+
+    # A PED devolve TODOS os sensores da PCD (chuva, nível, temp...). Se o
+    # feed identifica o sensor, mantém só chuva; sem identificação, mantém
+    # tudo (feeds simples do mapa já são só pluviômetros).
+    if df["sensor"].str.strip().any():
+        chuva_mask = df["sensor"].str.lower().str.contains(
+            "chuva|pluv|precip", regex=True, na=False
+        )
+        if chuva_mask.any():
+            df = df[chuva_mask]
     df["datahora"] = pd.to_datetime(df["datahora"], utc=True, errors="coerce")
     # Sem datahora utilizável → usa o instante da coleta (snapshot).
     df["datahora"] = df["datahora"].fillna(pd.Timestamp.utcnow())
@@ -273,17 +400,18 @@ def run() -> dict[str, Any]:
 
 
 def main() -> int:
-    """Entry point com guard: sem URL configurada, não quebra o pipeline.
+    """Entry point com guard: sem credencial/URL configurada, não quebra o pipeline.
 
     Returns:
         0 sempre que a coleta não for erro fatal (o step roda com
         continue-on-error); apenas loga e sai.
     """
-    if not _DADOS_URL:
+    if not (_DADOS_URL or (_EMAIL and _SENHA)):
         logger.warning(
-            "CEMADEN_DADOS_URL ausente — coletor CEMADEN ignorado. Capture a URL "
-            "JSON aberta no DevTools (Network) do mapainterativo.cemaden.gov.br "
-            "(camada de pluviômetros) e defina CEMADEN_DADOS_URL no .env/Secrets."
+            "CEMADEN sem acesso configurado — coletor ignorado. Preferido: "
+            "cadastre-se no CEMADEN (PED) e defina CEMADEN_EMAIL/CEMADEN_PASSWORD "
+            "nos Secrets (token SGAA automático). Alternativa: CEMADEN_DADOS_URL "
+            "com a URL JSON aberta do mapa interativo."
         )
         return 0
 
@@ -298,7 +426,7 @@ def main() -> int:
         logger.error(f"CEMADEN — falha de rede após retries: {exc}")
         return 0
     except (ValueError, KeyError) as exc:
-        logger.error(f"CEMADEN — resposta inesperada: {exc}")
+        logger.error(f"CEMADEN — credencial/resposta inválida: {exc}")
         return 0
 
 

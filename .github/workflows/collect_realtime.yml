@@ -29,9 +29,11 @@ jobs:
       CF_WORKER_URL:                ${{ secrets.CF_WORKER_URL }}
       ANA_IDENTIFICADOR:            ${{ secrets.ANA_IDENTIFICADOR }}
       ANA_SENHA:                    ${{ secrets.ANA_SENHA }}
-      # CEMADEN é dado ABERTO (sem login). URL JSON da camada de pluviômetros
-      # do mapa interativo — configurável por secret/variable para não acoplar
-      # o código a uma rota interna que pode mudar.
+      # CEMADEN — rota oficial: API PED com token SGAA (cadastro gratuito).
+      # CEMADEN_EMAIL/PASSWORD autenticam no SGAA; CEMADEN_DADOS_URL é o
+      # fallback aberto (URL JSON do mapa interativo, rota que pode mudar).
+      CEMADEN_EMAIL:                ${{ secrets.CEMADEN_EMAIL }}
+      CEMADEN_PASSWORD:             ${{ secrets.CEMADEN_PASSWORD }}
       CEMADEN_DADOS_URL:            ${{ secrets.CEMADEN_DADOS_URL }}
       NASA_USER:                    ${{ secrets.NASA_USER }}
       NASA_PASS:                    ${{ secrets.NASA_PASS }}
