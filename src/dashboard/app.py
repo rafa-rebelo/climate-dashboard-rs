@@ -130,21 +130,35 @@ PLOTLY_LAYOUT = dict(
 # ---------------------------------------------------------------------------
 
 @st.cache_data(ttl=_TTL, show_spinner=False)
+def _api_get_cached(path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Busca crua na API v3. LEVANTA em erro de propósito.
+
+    O st.cache_data só memoiza o retorno; quando esta função levanta, nada é
+    cacheado. Assim o caminho de erro fica FORA do cache (ver api_get).
+    """
+    resp = httpx.get(f"{API_BASE}{path}", params=params or {}, timeout=30.0)
+    resp.raise_for_status()
+    return resp.json()
+
+
 def api_get(path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-    """GET na API FastAPI v3 com cache de 10 min.
+    """GET na API FastAPI v3: sucesso cacheado 10 min, erro NÃO cacheado.
+
+    Cachear a falha faria o dashboard ficar "offline" por até 10 min mesmo
+    depois de a API voltar — e o F5 do navegador não limpa o cache do Streamlit
+    (ele vive no processo do servidor). Deixando o erro fora do cache, o próximo
+    auto-refresh/rerun já reconecta assim que a API responde.
 
     Args:
         path:   Caminho do endpoint.
         params: Query params opcionais.
 
     Returns:
-        Corpo JSON; em erro, dict com chave "_erro".
+        Corpo JSON; em erro, dict com chave "_erro" (não cacheado).
     """
     url = f"{API_BASE}{path}"
     try:
-        resp = httpx.get(url, params=params or {}, timeout=30.0)
-        resp.raise_for_status()
-        return resp.json()
+        return _api_get_cached(path, params)
     except httpx.HTTPStatusError as exc:
         return {"_erro": f"HTTP {exc.response.status_code}", "_url": url}
     except httpx.HTTPError as exc:
@@ -669,7 +683,22 @@ def _card_rio(rio: dict[str, Any], previsoes: list[dict], hist: dict[str, Any]) 
     _grafico_rio(obs, validas, rio)
 
 
+def _slug_rio(nome: Any) -> str:
+    """Normaliza nome de rio para slug ASCII ('Guaíba' → 'guaiba')."""
+    import unicodedata
+    return (unicodedata.normalize("NFD", str(nome))
+            .encode("ascii", "ignore").decode().lower().strip())
+
+
 def _serie_rio(hist: dict[str, Any], rio_id: str) -> pd.DataFrame:
+    """Série diária de nível observado do rio, robusta ao schema do R2.
+
+    O Parquet de live_river_levels no R2 pode vir com o schema de status
+    (rio_nome/current_level_m/updated_at) ou de série (rio_nome/nivel_m/ts),
+    e usa rio_nome (com acento), não rio_id. Aqui filtramos por rio_id direto
+    ou por slug(rio_nome), aceitamos os aliases de coluna e agregamos 1 ponto
+    por dia (mediana das estações) para uma linha "Observado" limpa.
+    """
     if not _ok(hist):
         return pd.DataFrame()
     regs: list[dict] = []
@@ -680,13 +709,25 @@ def _serie_rio(hist: dict[str, Any], rio_id: str) -> pd.DataFrame:
     df = pd.DataFrame(regs)
     if "rio_id" in df.columns:
         df = df[df["rio_id"].astype(str) == str(rio_id)]
-    nivel = next((c for c in ("nivel_atual_m", "nivel_m", "level_m") if c in df.columns), None)
-    tsc = next((c for c in ("timestamp", "ts") if c in df.columns), None)
+    elif "rio_nome" in df.columns:
+        df = df[df["rio_nome"].map(_slug_rio) == str(rio_id)]
+    nivel = next((c for c in ("nivel_atual_m", "current_level_m", "nivel_m", "level_m")
+                  if c in df.columns), None)
+    tsc = next((c for c in ("timestamp", "ts", "updated_at", "data_hora_medicao")
+                if c in df.columns), None)
     if df.empty or nivel is None or tsc is None:
         return pd.DataFrame()
-    df["ts"] = pd.to_datetime(df[tsc], errors="coerce")
+    df["ts"] = pd.to_datetime(df[tsc], utc=True, errors="coerce")
     df["nivel"] = pd.to_numeric(df[nivel], errors="coerce")
-    return df.dropna(subset=["ts", "nivel"]).sort_values("ts")
+    df = df.dropna(subset=["ts", "nivel"])
+    if df.empty:
+        return pd.DataFrame()
+    # 1 ponto/dia (mediana entre estações do rio) → série "Observado" limpa.
+    df["_d"] = df["ts"].dt.date
+    g = (df.sort_values("ts").groupby("_d")
+         .agg(ts=("ts", "last"), nivel=("nivel", "median"))
+         .reset_index(drop=True))
+    return g
 
 
 def _grafico_rio(obs: pd.DataFrame, previsoes: list[dict], rio: dict[str, Any]) -> None:

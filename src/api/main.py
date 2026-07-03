@@ -653,6 +653,14 @@ async def analytics_history(
         if not contents:
             continue
 
+        # 1 Parquet por dia (o mais recente) basta: as fontes de SNAPSHOT (ana)
+        # gravam o estado a cada run e as de SÉRIE (inmet) já carregam ~30 dias
+        # por arquivo. Baixar os ~72 arquivos/dia de cada partição deixava a
+        # resposta lenta (>30s → timeout no dashboard, sumindo a série
+        # "Observado") e chegava a travar o event loop. O dedup a jusante
+        # (dashboard) resolve sobreposições de série.
+        contents = [max(contents, key=lambda o: o["LastModified"])]
+
         frames: list[pd.DataFrame] = []
         for obj in contents:
             try:

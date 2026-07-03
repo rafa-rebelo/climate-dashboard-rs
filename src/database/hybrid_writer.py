@@ -471,6 +471,24 @@ class HybridWriter:
             result.duration_s = time.monotonic() - t0
             return result
 
+        # live_river_levels tem PK = rio_id (snapshot 1 linha/rio). O
+        # ana_collector envia 1 linha POR ESTAÇÃO e vários rios têm várias
+        # estações (Sinos 3, Jacuí 3, Guaíba 2) → o mesmo slug apareceria N vezes
+        # e o Postgres recusa ("ON CONFLICT DO UPDATE command cannot affect row a
+        # second time"), zerando percentual_cota/status. Deduplica para o PG
+        # mantendo a leitura MAIS CRÍTICA (maior % da cota de alerta) — postura
+        # conservadora para EWS. O R2 (Fluxo B) segue recebendo o df completo.
+        df_db = df.copy()
+        df_db["_slug"] = df_db.apply(
+            lambda r: _rio_slug(
+                r.get("rio_nome") or r.get("river") or r.get("station_code") or ""
+            ),
+            axis=1,
+        )
+        if "pct_cota_alerta" in df_db.columns:
+            df_db = df_db.sort_values("pct_cota_alerta", na_position="first")
+        df_db = df_db.drop_duplicates(subset="_slug", keep="last")
+
         conn = _pg_connect()
         if conn is not None:
             try:
@@ -496,7 +514,7 @@ class HybridWriter:
                         float(r["pct_cota_alerta"]) if pd.notna(r.get("pct_cota_alerta")) else None,
                         datetime.now(tz=timezone.utc),
                     )
-                    for _, r in df.iterrows()
+                    for _, r in df_db.iterrows()
                 ]
                 with conn.cursor() as cur:
                     psycopg2.extras.execute_values(cur, """
