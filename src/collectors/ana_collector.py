@@ -87,56 +87,76 @@ _CF_PROXY = os.getenv("CF_WORKER_URL", "").rstrip("/")
 BASE_URL = f"{_CF_PROXY}/hidrowebservice" if _CF_PROXY else "https://www.ana.gov.br/hidrowebservice"
 
 # ── Estações dos rios críticos do RS ─────────────────────────────────────────
+# 03/07/2026 — COTAS POR ESTAÇÃO (não mais por rio). Cada régua tem zero
+# próprio: Muçum inunda aos 18 m, Encantado aos 14 m — uma cota única por rio
+# gerava FALSO EMERGENCIA (7,3 m em Muçum era classificado 146% da "cota 5 m").
+# Fonte das cotas do Taquari: SACE-SGB / Defesa Civil (Alerta Hidrológico da
+# Bacia do Rio Taquari). Demais rios: cotas herdadas do config antigo até o
+# Agente 5 fornecer os valores oficiais por ponto de controle.
+# Códigos mortos removidos (fora do inventário ativo, telemetria vazia):
+# 86724000, 86696000, 86600000, 87030000 (Lagoa dos Patos — SEM estação
+# telemétrica de nível com dado na ANA; monitoramento ao vivo inviável),
+# 86900000 Porto Gomes (Operando=1 mas 0 leituras em 30 dias).
 RIOS_RS: dict[str, dict] = {
     "Sinos": {
         # 11/06/2026: códigos antigos (87386000/87374000/87392000/87358000)
         # estavam sem telemetria ou desativados — 0 leituras em 30 dias.
-        # Substituídos pelas telemétricas operantes validadas no inventário:
-        # 87382000 São Leopoldo (referência das cotas), 87380000 Campo Bom,
-        # 87376000 Foz do Paranhana.
-        "codigos":           [87382000, 87380000, 87376000],
-        "cota_atencao_m":    3.5,
-        "cota_alerta_m":     4.5,
-        "cota_emergencia_m": 5.5,
-        "municipios":        ["São Leopoldo", "Novo Hamburgo", "Canoas"],
+        "estacoes": {
+            87382000: {"nome": "São Leopoldo",     "cota_atencao_m": 3.5,
+                       "cota_alerta_m": 4.5, "cota_emergencia_m": 5.5},
+            87380000: {"nome": "Campo Bom",        "cota_atencao_m": 3.5,
+                       "cota_alerta_m": 4.5, "cota_emergencia_m": 5.5},
+            87376000: {"nome": "Foz do Paranhana", "cota_atencao_m": 3.5,
+                       "cota_alerta_m": 4.5, "cota_emergencia_m": 5.5},
+        },
+        "municipios": ["São Leopoldo", "Novo Hamburgo", "Canoas"],
     },
     "Taquari": {
-        "codigos":           [86900000, 86510000, 86724000],
-        "cota_atencao_m":    3.5,
-        "cota_alerta_m":     5.0,
-        "cota_emergencia_m": 7.0,
-        "municipios":        ["Lajeado", "Estrela", "Encantado", "Muçum"],
+        # Cotas oficiais SGB/Defesa Civil (atenção/alerta/inundação):
+        # Muçum 15/17/18 · Encantado 11/13/14. 86720000 Encantado validado
+        # em 02/07/2026 (2.780 leituras/30d, cota ao vivo).
+        "estacoes": {
+            86510000: {"nome": "Muçum",     "cota_atencao_m": 15.0,
+                       "cota_alerta_m": 17.0, "cota_emergencia_m": 18.0},
+            86720000: {"nome": "Encantado", "cota_atencao_m": 11.0,
+                       "cota_alerta_m": 13.0, "cota_emergencia_m": 14.0},
+        },
+        "municipios": ["Lajeado", "Estrela", "Encantado", "Muçum"],
     },
     "Jacuí": {
-        "codigos":           [86696000, 86500000, 86600000],
-        "cota_atencao_m":    5.0,
-        "cota_alerta_m":     7.0,
-        "cota_emergencia_m": 9.0,
-        "municipios":        ["Rio Pardo", "Santa Cruz do Sul"],
+        # ATENÇÃO (Agente 5): 86500000 = Passo Carreiro (Guaporé), RIO
+        # CARREIRO — afluente da bacia Taquari-Antas, NÃO o leito do Jacuí.
+        # As telemétricas do leito (Dona Francisca, Cachoeira do Sul,
+        # Charqueadas) estão sem dado. Mantido até decisão de rótulo/estação.
+        "estacoes": {
+            86500000: {"nome": "Passo Carreiro (Rio Carreiro)",
+                       "cota_atencao_m": 5.0,
+                       "cota_alerta_m": 7.0, "cota_emergencia_m": 9.0},
+        },
+        "municipios": ["Rio Pardo", "Santa Cruz do Sul"],
     },
     "Guaíba": {
-        "codigos":           [87010000, 87020000],
-        "cota_atencao_m":    2.5,
-        "cota_alerta_m":     3.0,
-        "cota_emergencia_m": 3.6,
-        "municipios":        ["Porto Alegre", "Eldorado do Sul"],
+        # ATENÇÃO (Agente 5): 87010000 Triunfo e 87020000 São Jerônimo são
+        # estações do BAIXO JACUÍ (Rio_Nome=RIO JACUÍ no inventário), usadas
+        # como proxy de montante do Guaíba. A régua oficial do Guaíba (Cais
+        # Mauá/POA) não está na telemetria ANA — pendente definição.
+        "estacoes": {
+            87010000: {"nome": "Triunfo (baixo Jacuí)",      "cota_atencao_m": 2.5,
+                       "cota_alerta_m": 3.0, "cota_emergencia_m": 3.6},
+            87020000: {"nome": "São Jerônimo (baixo Jacuí)", "cota_atencao_m": 2.5,
+                       "cota_alerta_m": 3.0, "cota_emergencia_m": 3.6},
+        },
+        "municipios": ["Porto Alegre", "Eldorado do Sul"],
     },
     "Camaquã": {
         # 15/06: 87540000/87530000 sem telemetria (0 leituras, congelado
         # desde 12/06). Substituído por 87905000 Passo do Mendonça (Cristal),
         # telemétrica ativa — mesmo padrão do fix do Sinos.
-        "codigos":           [87905000],
-        "cota_atencao_m":    3.0,
-        "cota_alerta_m":     4.0,
-        "cota_emergencia_m": 5.0,
-        "municipios":        ["Camaquã", "Cristal"],
-    },
-    "Lagoa_Patos": {
-        "codigos":           [87030000],
-        "cota_atencao_m":    1.2,
-        "cota_alerta_m":     1.5,
-        "cota_emergencia_m": 2.0,
-        "municipios":        ["Pelotas", "Rio Grande"],
+        "estacoes": {
+            87905000: {"nome": "Passo do Mendonça", "cota_atencao_m": 3.0,
+                       "cota_alerta_m": 4.0, "cota_emergencia_m": 5.0},
+        },
+        "municipios": ["Camaquã", "Cristal"],
     },
 }
 
@@ -916,25 +936,27 @@ def coletar_rios_rs(
     logger.info("Coletando rios criticos RS...")
 
     for rio, cfg in RIOS_RS.items():
-        logger.info(f"  {rio} — {len(cfg['codigos'])} estacoes")
-        for cod in cfg["codigos"]:
+        logger.info(f"  {rio} — {len(cfg['estacoes'])} estacoes")
+        for cod, est in cfg["estacoes"].items():
             try:
                 df = client.serie_adotada(cod, range_intervalo=range_intervalo)
                 if df.empty:
-                    logger.warning(f"    Sem dados: {cod}")
+                    logger.warning(f"    Sem dados: {cod} ({est['nome']})")
                     continue
 
+                # Cotas POR ESTAÇÃO (cada régua tem zero próprio — SGB).
                 df["rio_nome"]          = rio
-                df["cota_atencao_m"]    = cfg["cota_atencao_m"]
-                df["cota_alerta_m"]     = cfg["cota_alerta_m"]
-                df["cota_emergencia_m"] = cfg["cota_emergencia_m"]
+                df["estacao_nome"]      = est["nome"]
+                df["cota_atencao_m"]    = est["cota_atencao_m"]
+                df["cota_alerta_m"]     = est["cota_alerta_m"]
+                df["cota_emergencia_m"] = est["cota_emergencia_m"]
 
                 if "nivel_m" in df.columns:
                     serie_nivel = df["nivel_m"].dropna()
                     if not serie_nivel.empty:
                         nivel  = float(serie_nivel.iloc[-1])
-                        status = classificar_nivel(nivel, cfg)
-                        pct    = nivel / cfg["cota_alerta_m"] * 100
+                        status = classificar_nivel(nivel, est)
+                        pct    = nivel / est["cota_alerta_m"] * 100
                         vazao: Optional[float] = None
                         if "vazao_m3s" in df.columns:
                             vz = df["vazao_m3s"].dropna()
@@ -944,16 +966,17 @@ def coletar_rios_rs(
                         status_list.append({
                             "rio_nome":          rio,
                             "station_code":      cod,
+                            "estacao_nome":      est["nome"],
                             "current_level_m":   round(nivel, 3),
-                            "cota_atencao_m":    cfg["cota_atencao_m"],
-                            "cota_alerta_m":     cfg["cota_alerta_m"],
-                            "cota_emergencia_m": cfg["cota_emergencia_m"],
+                            "cota_atencao_m":    est["cota_atencao_m"],
+                            "cota_alerta_m":     est["cota_alerta_m"],
+                            "cota_emergencia_m": est["cota_emergencia_m"],
                             "pct_cota_alerta":   round(pct, 1),
                             "flow_m3s":          vazao,
                             "alert_level":       status,
                             "updated_at":        agora.isoformat(),
                         })
-                        _log_nivel(rio, cod, nivel, pct, status)
+                        _log_nivel(f"{rio}/{est['nome']}", cod, nivel, pct, status)
 
                 all_series.append(df)
                 time.sleep(0.5)
@@ -1019,7 +1042,7 @@ def coletar_qualidade_agua_rs(
     estacoes_qa = [
         cod
         for cfg in RIOS_RS.values()
-        for cod in cfg["codigos"]
+        for cod in cfg["estacoes"]
     ]
 
     logger.info(f"Qualidade da agua — {len(estacoes_qa)} estacoes RS")
@@ -1107,7 +1130,7 @@ def coletar_chuva_rs(
         )
     else:
         # Fallback: estações telemétricas conhecidas dos rios monitorados
-        codigos = [str(c) for cfg in RIOS_RS.values() for c in cfg["codigos"]]
+        codigos = [str(c) for cfg in RIOS_RS.values() for c in cfg["estacoes"]]
         logger.info("Inventario nao tem telemétricas — usando estacoes de RIOS_RS.")
 
     logger.info(f"Coletando chuva — {len(codigos)} estacoes telemétricas no RS")
