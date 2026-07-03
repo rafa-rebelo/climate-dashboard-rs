@@ -4,7 +4,8 @@ Processador de acumulados de chuva — arquitetura híbrida v4 (sem DuckDB).
 
 Fluxo de execução:
   1. Baixa do R2 o Parquet mais recente de live_rain_readings
-     (série de ~30 dias gravada pelo inmet_collector a cada run).
+     (série de ~30 dias gravada pelo inmet_collector a cada run) e a
+     série CEMADEN (1 snapshot/hora do prefixo live_rain_cemaden).
   2. Calcula acumulados 1h/3h/6h/12h/24h/48h/72h/7d por estação com pandas,
      ancorados no MAX(ts) de cada estação (não em now() — robusto a lag).
   3. UPSERT dos campos precip_1h/precip_6h/precip_24h na tabela
@@ -51,6 +52,9 @@ _PROC_DIR  = Path(__file__).resolve().parents[2] / "data" / "processed"
 _OUT_ACCUM = _PROC_DIR / "accumulated_rain.parquet"
 
 _R2_RAIN_PREFIX = "historico/live_rain_readings"
+# Snapshots do coletor CEMADEN (1 linha/estação por run, rain_1h_mm da última
+# hora) — prefixo PRÓPRIO para não contaminar a série de 30 dias do INMET.
+_R2_CEM_PREFIX = "historico/live_rain_cemaden"
 
 # Janelas de acumulação (nome da coluna → timedelta)
 _WINDOWS: dict[str, timedelta] = {
@@ -132,6 +136,83 @@ def load_rain_series_from_r2() -> pd.DataFrame:
     logger.info(
         f"  {len(df):,} leituras | {df['station_id'].nunique()} estações "
         f"| {df['ts'].min():%d/%m %H:%M} → {df['ts'].max():%d/%m %H:%M} UTC"
+    )
+    return df
+
+
+def load_cemaden_series_from_r2(days_back: int = 7) -> pd.DataFrame:
+    """Série horária de chuva CEMADEN a partir dos snapshots do R2.
+
+    O cemaden_collector grava a cada run (~10 min) um snapshot com 1 linha
+    por estação (rain_1h_mm = acumulado da última hora). Para as janelas de
+    acumulação basta 1 snapshot POR HORA — somar amostras horárias de
+    rain_1h_mm aproxima o total do período. Seleciona o Parquet mais novo de
+    cada hora (timestamp na chave) nos últimos ``days_back`` dias e baixa em
+    paralelo (são arquivos de ~6 KB).
+
+    Args:
+        days_back: Janela de histórico em dias (7 cobre a janela rain_7d).
+
+    Returns:
+        DataFrame com station_id (CEM_*), ts (UTC) e rain_1h_mm — 1 linha por
+        estação×hora. Vazio se o R2 estiver indisponível ou sem snapshots.
+    """
+    import re
+    from concurrent.futures import ThreadPoolExecutor
+
+    s3 = _r2_client()
+    bucket = os.getenv("R2_BUCKET_NAME", "")
+    if s3 is None or not bucket:
+        return pd.DataFrame()
+
+    now = datetime.now(timezone.utc)
+    por_hora: dict[str, dict[str, Any]] = {}
+    for dback in range(days_back + 1):
+        dia = now - timedelta(days=dback)
+        prefix = (f"{_R2_CEM_PREFIX}/ano={dia.year}"
+                  f"/mes={dia.month:02d}/dia={dia.day:02d}/")
+        resp = s3.list_objects_v2(Bucket=bucket, Prefix=prefix, MaxKeys=1000)
+        for obj in resp.get("Contents", []):
+            # chave: .../live_rain_cemaden_YYYYMMDD_HHMMSSUTC.parquet → 1/hora
+            m = re.search(r"_(\d{8})_(\d{2})\d{4}UTC", obj["Key"])
+            hora = f"{m.group(1)}_{m.group(2)}" if m else obj["Key"]
+            atual = por_hora.get(hora)
+            if atual is None or obj["LastModified"] > atual["LastModified"]:
+                por_hora[hora] = obj
+
+    if not por_hora:
+        logger.info("CEMADEN: nenhum snapshot no R2 (fonte recém-ativada?).")
+        return pd.DataFrame()
+
+    def _fetch(key: str) -> Optional[pd.DataFrame]:
+        try:
+            body = s3.get_object(Bucket=bucket, Key=key)["Body"].read()
+            return pd.read_parquet(io.BytesIO(body))
+        except Exception as exc:  # noqa: BLE001 — 1 arquivo ruim não derruba a série
+            logger.warning(f"  CEMADEN: snapshot {key} ignorado ({exc})")
+            return None
+
+    keys = [o["Key"] for o in por_hora.values()]
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        frames = [f for f in ex.map(_fetch, keys) if f is not None and not f.empty]
+    if not frames:
+        return pd.DataFrame()
+
+    df = pd.concat(frames, ignore_index=True)
+    if "station_id" not in df.columns:
+        return pd.DataFrame()
+    df["ts"] = pd.to_datetime(df["ts"], utc=True, errors="coerce")
+    df["rain_1h_mm"] = pd.to_numeric(df.get("rain_1h_mm"), errors="coerce")
+    df = df.dropna(subset=["station_id", "ts"])
+    # 1 amostra por estação×hora (dedup defensivo, além da seleção por chave).
+    df["_h"] = df["ts"].dt.floor("h")
+    df = (df.sort_values("ts")
+          .drop_duplicates(subset=["station_id", "_h"], keep="last")
+          .drop(columns="_h"))
+    logger.info(
+        f"Série CEMADEN: {len(df):,} amostras horárias | "
+        f"{df['station_id'].nunique()} estações | "
+        f"{df['ts'].min():%d/%m %H:%M} → {df['ts'].max():%d/%m %H:%M} UTC"
     )
     return df
 
@@ -308,7 +389,11 @@ def run_accumulator() -> dict[str, Any]:
     t_start = datetime.now(timezone.utc)
     logger.info("=== RainAccumulator v4 — R2 → Supabase ===")
 
-    serie  = load_rain_series_from_r2()
+    serie     = load_rain_series_from_r2()          # INMET (série 30d)
+    serie_cem = load_cemaden_series_from_r2()       # CEMADEN (snapshots 1/h)
+    if not serie_cem.empty:
+        serie = (pd.concat([serie, serie_cem], ignore_index=True)
+                 if not serie.empty else serie_cem)
     df_acc = compute_rain_accumulated(serie)
 
     pg_rows    = upsert_accumulated_supabase(df_acc)
