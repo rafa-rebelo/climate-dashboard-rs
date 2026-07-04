@@ -56,6 +56,20 @@ ESTACOES_RS: dict[str, list[int]] = {
     "sinos":   [87382000, 87380000],
     # PASSO DO MENDONÇA (Cristal) — Rio Camaquã
     "camaqua": [87905000],
+    # ── Onda DCRS (censo 04/07/2026 — sondagem SOAP 2005/2015/2024/2026) ──
+    # BARCA DO CAÍ — Rio Caí, série completa 2005→2026 (10 estações DCRS na bacia)
+    "cai":      [87170000],
+    # MANOEL VIANA — Rio Ibicuí, série completa + telemetria ANA ativa
+    "ibicui":   [76560000],
+    # SANTO ÂNGELO — Rio Ijuí, série completa + telemetria ANA ativa
+    "ijui":     [75230000],
+    # ALBATROZ (Canoas) — Rio Gravataí. RESSALVA: série 2005→abr/2024 e PAROU
+    # (estação possivelmente perdida na enchente de mai/2024) — validação
+    # recente e costura ficam 100% na régua DCRS (zero diferente).
+    "gravatai": [87406000],
+    # CANDELÁRIA MONTANTE — Rio Pardo. RESSALVA: série 2005→jun/2024 e parou
+    # (mesmo caso do Gravataí).
+    "pardo":    [85735000],
 }
 
 # tipo_dados da API: 1=Cotas, 2=Chuvas, 3=Vazões

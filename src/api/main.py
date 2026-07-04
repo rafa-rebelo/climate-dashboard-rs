@@ -320,6 +320,8 @@ class ModelInfoItem(BaseModel):
     ultima_inferencia: str | None
     horizontes_dias:   list[int]
     aviso_ic:      str
+    periodo_treino:    dict[str, Any] | None = None   # {inicio, fim, dias_com_dado}
+    ressalva:          str | None = None              # ressalva de fonte (Agente 5)
 
 
 class ModelInfoResponse(BaseModel):
@@ -954,7 +956,8 @@ async def forecasts_model_info() -> ModelInfoResponse:
     if cached:
         return cached
 
-    rios = ["guaiba", "jacui", "taquari", "sinos", "camaqua"]
+    rios = ["guaiba", "jacui", "taquari", "sinos", "camaqua",
+            "cai", "ibicui", "ijui", "gravatai", "pardo"]
 
     # Última inferência por rio (status real do snapshot).
     infer: dict[str, dict[str, Any]] = {}
@@ -1008,6 +1011,8 @@ async def forecasts_model_info() -> ModelInfoResponse:
             ultima_inferencia = _iso(inf.get("ultima")),
             horizontes_dias   = meta.get("horizontes_dias") or [1, 2, 3, 6],
             aviso_ic          = _IC_AVISO,
+            periodo_treino    = meta.get("periodo_treino"),
+            ressalva          = meta.get("ressalva"),
         ))
 
     resp = ModelInfoResponse(

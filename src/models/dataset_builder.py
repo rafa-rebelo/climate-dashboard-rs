@@ -86,6 +86,33 @@ _BACIAS_IBGE: dict[str, dict[str, str]] = {
         "4304507": "Canguçu",
         "4306908": "Encruzilhada do Sul",
     },
+    # ── Onda DCRS (códigos VALIDADOS no BigQuery em 04/07/2026) ──────────
+    "cai": {  # bacia do Caí (serra → São Sebastião do Caí)
+        "4308201": "Caxias do Sul (Aeroporto)",
+        "4304408": "Canela",
+        "4302105": "Bento Gonçalves",
+    },
+    "ibicui": {  # oeste — maior bacia do RS
+        "4300406": "Alegrete",
+        "4317400": "Santiago",
+        "4318309": "São Gabriel",
+        "4316907": "Santa Maria",
+    },
+    "ijui": {  # noroeste
+        "4306106": "Cruz Alta",
+        "4317806": "Santo Augusto",
+        "4310009": "Ibirubá",
+        "4317202": "Santa Rosa",
+    },
+    "gravatai": {  # metropolitana
+        "4314902": "Porto Alegre",
+        "4303103": "Cachoeirinha",
+        "4323002": "Viamão",
+    },
+    "pardo": {  # centro-serra
+        "4315701": "Rio Pardo",
+        "4320800": "Soledade",
+    },
 }
 
 _R2_RIVER_PREFIX = "historico/live_river_levels"

@@ -154,6 +154,7 @@ def save_model(
     rio_alvo: str,
     version: str,
     metrics: dict[str, float],
+    extra: dict | None = None,
 ) -> None:
     """Salva state_dict + metadata do modelo no R2.
 
@@ -162,6 +163,8 @@ def save_model(
         rio_alvo: Slug do rio (guaiba, taquari, ...).
         version: Identificador da versão (ex.: 'v1').
         metrics: Métricas de avaliação (ex.: {'mae_val': 0.08}).
+        extra: Metadados adicionais mesclados no topo do metadata (ex.:
+            periodo_treino da série usada, ressalva de fonte/régua).
 
     Raises:
         RuntimeError: Se o R2 não estiver configurado.
@@ -179,6 +182,7 @@ def save_model(
         "hparams":    model.hparams,
         "features":   _FEATURE_COLS,
         "horizontes_dias": [1, 2, 3, 6],
+        **(extra or {}),
     }
     payload = {"state_dict": model.state_dict(), "metadata": metadata}
     buf = io.BytesIO()

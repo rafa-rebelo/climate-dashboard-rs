@@ -805,6 +805,13 @@ def secao_modelo() -> None:
             qualidade = ("excelente" if (nmae is not None and nmae < 3)
                          else "boa" if (nmae is not None and nmae < 5)
                          else "homologada" if mae is not None else "—")
+            per = m.get("periodo_treino") or {}
+            periodo_txt = (f"<br>📅 Dados de treino: <b>{per.get('inicio', '?')} → "
+                           f"{per.get('fim', '?')}</b> "
+                           f"({per.get('dias_com_dado', 0):,} dias)".replace(",", ".")
+                           if per else "")
+            ressalva_txt = (f"<br><span style='color:#fcd34d'>⚠️ "
+                            f"{m['ressalva']}</span>" if m.get("ressalva") else "")
             with col:
                 st.markdown(
                     f"<div class='card' style='border-left-color:{cor}'>"
@@ -812,8 +819,9 @@ def secao_modelo() -> None:
                     f"<span style='color:{cor}'>{label}</span><br>"
                     f"📏 Erro típico (1 dia): <b>{_fmt(mae, ' m', 3)}</b>"
                     + (f" &nbsp;·&nbsp; {nmae:.1f}% da faixa do rio" if nmae is not None else "")
-                    + f"<br>🎯 Qualidade: <b>{qualidade}</b><br>"
-                    f"<span class='muted'>treinado em {_fmt_ts(m.get('treinado_em'), '%d/%m/%Y')} · "
+                    + f"<br>🎯 Qualidade: <b>{qualidade}</b>"
+                    + periodo_txt + ressalva_txt +
+                    f"<br><span class='muted'>treinado em {_fmt_ts(m.get('treinado_em'), '%d/%m/%Y')} · "
                     f"última previsão {_fmt_ts(m.get('ultima_inferencia'))}</span></div>",
                     unsafe_allow_html=True)
 
