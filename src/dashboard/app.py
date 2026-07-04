@@ -551,6 +551,198 @@ def secao_clima() -> None:
 
 
 # ---------------------------------------------------------------------------
+# SEÇÃO Bacias RS — Rede Hidrometeorológica da Defesa Civil RS (DCRS)
+# ---------------------------------------------------------------------------
+
+_DCRS_MAPA_OFICIAL = "https://redehidrometeorologica.defesacivil.rs.gov.br/Mapa"
+
+# Variável → (coluna, unidade, colorscale, legenda, cmin_fixo, cmax_minimo)
+_DCRS_VARS: dict[str, tuple] = {
+    "🌊 Nível do rio":       ("rio_nivel",   "m",    SCALE_WIND,   LEGEND_WIND,   None, None),
+    "🌧️ Chuva acumulada":    ("chuva",       "mm",   SCALE_PRECIP, LEGEND_PRECIP, 0.0,  10.0),
+    "🌡️ Temperatura":        ("temperatura", "°C",   SCALE_TEMP,   LEGEND_TEMP,   None, None),
+    "💧 Umidade":             ("umidade",     "%",    SCALE_PRECIP, LEGEND_PRECIP, 0.0,  100.0),
+    "💨 Vento":               ("vento_vel",   "km/h", SCALE_WIND,   LEGEND_WIND,   0.0,  40.0),
+    "🥵 Sensação térmica":    ("senstermica", "°C",   SCALE_TEMP,   LEGEND_TEMP,   None, None),
+}
+_DCRS_JANELAS = {"1h": "chuva_1h", "3h": "chuva_3h", "6h": "chuva_6h",
+                 "12h": "chuva_12h", "24h": "chuva_24h", "48h": "chuva_48h",
+                 "72h": "chuva_72h", "7d": "chuva_168h"}
+
+
+def _dcrs_nivel_exibicao(v: Any) -> float | None:
+    """Nível para exibição em metros, com heurística de unidade.
+
+    A rede DCRS entrega rio_nivel em unidade mista por estação (lagoas ~0,3 m;
+    serra ~860, aparenta cm). Valores >= 30 são tratados como cm e divididos
+    por 100 — heurística SINALIZADA na interface, não silenciosa.
+    """
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    if pd.isna(f):
+        return None
+    return round(f / 100.0, 2) if f >= 30.0 else round(f, 2)
+
+
+def secao_bacias() -> None:
+    """Aba Bacias RS: mapa por bacia da rede DCRS com seletor de variável."""
+    st.subheader("🗺️ Bacias Hidrográficas RS — Defesa Civil (tempo real)")
+    st.markdown(
+        f"<div class='muted'>Rede Hidrometeorológica da Defesa Civil RS "
+        f"(estações DCRS, cadência de minutos) · "
+        f"<a href='{_DCRS_MAPA_OFICIAL}' target='_blank' "
+        f"style='color:#38bdf8'>mapa oficial ↗</a></div>",
+        unsafe_allow_html=True,
+    )
+
+    data = api_get("/api/v3/dcrs/stations")
+    if not _ok(data):
+        st.error(f"API indisponível para bacias DCRS: {data['_erro']}")
+        return
+    df = pd.DataFrame(data.get("estacoes", []))
+    if df.empty:
+        st.warning("Sem estações DCRS no momento (coletor recém-ativado?).")
+        return
+    df = df[df["latitude"].notna() & df["longitude"].notna()].copy()
+    df["nivel_m"] = df["rio_nivel"].map(_dcrs_nivel_exibicao)
+
+    # ── Seletores: Bacia + Variável + Janela de chuva ─────────────────────
+    bacias = sorted(b for b in df["bacia"].dropna().unique() if b)
+    c1, c2, c3 = st.columns([2.2, 1.6, 1.0])
+    with c1:
+        bacia_sel = st.selectbox("Bacia hidrográfica",
+                                 ["🌎 Todas as bacias"] + bacias, key="dcrs_bacia")
+    with c2:
+        var_sel = st.selectbox("Variável", list(_DCRS_VARS.keys()), key="dcrs_var")
+    janela_lbl = "24h"
+    with c3:
+        if var_sel.startswith("🌧️"):
+            janela_lbl = st.selectbox("Janela", list(_DCRS_JANELAS.keys()),
+                                      index=4, key="dcrs_janela")
+        else:
+            st.caption("")
+
+    sel = df if bacia_sel.startswith("🌎") else df[df["bacia"] == bacia_sel]
+    if sel.empty:
+        st.warning("Sem estações nesta bacia.")
+        return
+
+    col, unidade, scale, legenda, cmin, cmax_min = _DCRS_VARS[var_sel]
+    if col == "chuva":
+        col = _DCRS_JANELAS[janela_lbl]
+    elif col == "rio_nivel":
+        col = "nivel_m"
+
+    vals = pd.to_numeric(sel[col], errors="coerce")
+    plot = sel[vals.notna()].copy()
+    if plot.empty:
+        st.warning(f"Nenhuma estação da seleção mede {var_sel}.")
+        return
+    vmin = float(vals.min()) if cmin is None else cmin
+    vmax = max(float(vals.max()), (cmax_min or float(vals.max()) or 1.0))
+    if vmin == vmax:
+        vmax = vmin + 1.0
+
+    # Centro/zoom: aproxima quando uma bacia específica é escolhida.
+    centro = {"lat": float(plot["latitude"].mean()),
+              "lon": float(plot["longitude"].mean())}
+    zoom = _RS_ZOOM if bacia_sel.startswith("🌎") else 7.2
+
+    titulo = (f"{var_sel} — {janela_lbl}" if var_sel.startswith("🌧️") else var_sel)
+    st.markdown(_legend_html(titulo, legenda, unidade), unsafe_allow_html=True)
+    fig = _mapa_pontos(
+        plot.rename(columns={"latitude": "lat", "longitude": "lon"}),
+        col, scale, unidade, vmin, vmax, "nome", modo="scatter", size=14,
+    )
+    fig.update_layout(mapbox={"style": "carto-darkmatter",
+                              "center": centro, "zoom": zoom})
+    fig.data[0].customdata = plot[[col, "codigo"]].values
+    evento = st.plotly_chart(fig, use_container_width=True,
+                             on_select="rerun", key="map_dcrs")
+
+    if var_sel.startswith("🌊"):
+        st.markdown(
+            "<div class='info-box'>ℹ️ O nível vem na unidade bruta da rede "
+            "(mista por estação). Valores ≥ 30 são exibidos como cm→m "
+            "(heurística sinalizada); confirme na estação antes de decisões "
+            "operacionais.</div>", unsafe_allow_html=True)
+
+    ts = pd.to_datetime(plot["timestamp"], errors="coerce", utc=True)
+    st.caption(
+        f"{len(plot)} estações · leitura mais recente "
+        f"{ts.max():%d/%m %H:%M} UTC · fonte: Defesa Civil RS"
+    )
+
+    # ── Painel da estação (clique ou seleção) ─────────────────────────────
+    sel_cod = None
+    pontos = (evento.get("selection", {}) or {}).get("points", []) if evento else []
+    if pontos and pontos[0].get("customdata") is not None:
+        cd = pontos[0]["customdata"]
+        sel_cod = str(cd[1]) if len(cd) > 1 else None
+
+    col_e, col_t = st.columns([2, 3], gap="medium")
+    with col_e:
+        codigos = plot.sort_values("nome")["codigo"].tolist()
+        labels = {r.codigo: f"{r.nome} ({r.codigo})" for r in plot.itertuples()}
+        if sel_cod is None:
+            sel_cod = st.selectbox("Estação (clique no mapa ou selecione)",
+                                   codigos, format_func=lambda c: labels.get(c, c),
+                                   key="dcrs_estacao")
+        else:
+            st.caption(f"Selecionada no mapa: **{labels.get(sel_cod, sel_cod)}**")
+        _painel_dcrs(df, sel_cod)
+
+    with col_t:
+        st.markdown("**Resumo da seleção — maiores chuvas 24h**")
+        top = (sel.assign(chuva_24h=pd.to_numeric(sel["chuva_24h"], errors="coerce"))
+               .dropna(subset=["chuva_24h"])
+               .nlargest(8, "chuva_24h")
+               [["nome", "bacia", "chuva_24h", "chuva_72h", "nivel_m"]])
+        if top.empty:
+            st.caption("Sem dados de chuva na seleção.")
+        else:
+            st.dataframe(
+                top.rename(columns={"nome": "Estação", "bacia": "Bacia",
+                                    "chuva_24h": "24h (mm)", "chuva_72h": "72h (mm)",
+                                    "nivel_m": "Nível (m)"}),
+                use_container_width=True, hide_index=True, height=300,
+            )
+
+
+def _painel_dcrs(df: pd.DataFrame, codigo: str) -> None:
+    """Card de uma estação DCRS com todas as métricas + cotas se houver."""
+    linha = df[df["codigo"] == codigo]
+    if linha.empty:
+        st.info("Estação sem leitura recente.")
+        return
+    r = linha.iloc[0]
+    nivel = r.get("nivel_m")
+    bruto = r.get("rio_nivel")
+    tend = r.get("rio_tendencia")
+    seta = "↑" if (tend or 0) > 0 else "↓" if (tend or 0) < 0 else "→"
+    cotas = ""
+    if pd.notna(r.get("cota_alerta")):
+        cotas = (f"<br><span class='muted'>cotas: atenção "
+                 f"{_fmt(r.get('cota_atencao'), 'm')} · alerta "
+                 f"{_fmt(r.get('cota_alerta'), 'm')} · emerg. "
+                 f"{_fmt(r.get('cota_emergencia'), 'm')}</span>")
+    st.markdown(
+        f"<div class='card'><b>{r.get('nome') or codigo}</b><br>"
+        f"<span class='muted'>{r.get('bacia') or ''} · {codigo}</span><br>"
+        f"🌊 nível <b>{_fmt(nivel, ' m', 2)}</b> {seta} "
+        f"<span class='muted'>(bruto {_fmt(bruto, '', 1)})</span>{cotas}<br>"
+        f"🌧️ 1h {_fmt(r.get('chuva_1h'), '')} · 24h {_fmt(r.get('chuva_24h'), '')} · "
+        f"72h {_fmt(r.get('chuva_72h'), '')} · 7d {_fmt(r.get('chuva_168h'), '')} mm<br>"
+        f"🌡️ {_fmt(r.get('temperatura'), ' °C')} · 💧 {_fmt(r.get('umidade'), ' %', 0)} · "
+        f"💨 {_fmt(r.get('vento_vel'), ' km/h', 0)}<br>"
+        f"<span class='muted'>🕐 leitura: {_fmt_ts(r.get('timestamp'))} UTC</span></div>",
+        unsafe_allow_html=True,
+    )
+
+
+# ---------------------------------------------------------------------------
 # SEÇÃO 4 — Sobre o Modelo ML (transparência didática)
 # ---------------------------------------------------------------------------
 
@@ -801,8 +993,9 @@ def main() -> None:
     _sidebar()
     st.title("Monitor Hidrometeorológico — Rio Grande do Sul")
 
-    aba1, aba2, aba3, aba4, aba5 = st.tabs([
-        "📍 Estações", "🌐 Mapa Climático", "🌊 Rios + ML", "📊 Clima", "🧠 Modelo ML",
+    aba1, aba2, aba3, aba4, aba5, aba6 = st.tabs([
+        "📍 Estações", "🌐 Mapa Climático", "🌊 Rios + ML", "🗺️ Bacias RS",
+        "📊 Clima", "🧠 Modelo ML",
     ])
     with aba1:
         secao_estacoes()
@@ -811,8 +1004,10 @@ def main() -> None:
     with aba3:
         secao_rios()
     with aba4:
-        secao_clima()
+        secao_bacias()
     with aba5:
+        secao_clima()
+    with aba6:
         secao_modelo()
 
 

@@ -328,6 +328,58 @@ class ModelInfoResponse(BaseModel):
     modelos:   list[ModelInfoItem]
 
 
+class DcrsStation(BaseModel):
+    codigo:           str
+    nome:             str | None
+    bacia:            str | None
+    latitude:         float | None
+    longitude:        float | None
+    rio_nome:         str | None
+    rio_nivel:        float | None
+    rio_vazao:        float | None
+    rio_tendencia:    float | None
+    cota_atencao:     float | None
+    cota_alerta:      float | None
+    cota_emergencia:  float | None
+    chuva_1h:         float | None
+    chuva_3h:         float | None
+    chuva_6h:         float | None
+    chuva_12h:        float | None
+    chuva_24h:        float | None
+    chuva_48h:        float | None
+    chuva_72h:        float | None
+    chuva_168h:       float | None
+    temperatura:      float | None
+    umidade:          float | None
+    vento_vel:        float | None
+    vento_dir:        float | None
+    pressao:          float | None
+    senstermica:      float | None
+    radiacao:         float | None
+    timestamp:        str | None
+
+
+class DcrsStationsResponse(BaseModel):
+    timestamp:      str
+    fonte:          str
+    total_estacoes: int
+    bacias:         list[str]
+    estacoes:       list[DcrsStation]
+
+
+class DcrsBaciaItem(BaseModel):
+    bacia:      str
+    estacoes:   int
+    com_rio:    int
+    chuva_24h_max: float | None
+
+
+class DcrsBaciasResponse(BaseModel):
+    timestamp: str
+    total:     int
+    bacias:    list[DcrsBaciaItem]
+
+
 class TrendDay(BaseModel):
     data:        str
     precip_mm:   float | None
@@ -1179,6 +1231,141 @@ async def analytics_trend(
         inclinacao       = inclinacao,
         metrica_tendencia = metrica,
         serie            = serie,
+    )
+    _cache_set(cache_key, resp)
+    return resp
+
+
+# ---------------------------------------------------------------------------
+# Endpoints 10/11 — Rede Hidrometeorológica Defesa Civil RS (DCRS)
+# ---------------------------------------------------------------------------
+
+@app.get(
+    "/api/v3/dcrs/bacias",
+    tags           = ["Bacias RS (Defesa Civil)"],
+    response_model = DcrsBaciasResponse,
+    summary        = "Bacias hidrográficas com estações DCRS (contagens)",
+)
+async def dcrs_bacias() -> DcrsBaciasResponse:
+    """Lista as bacias da rede DCRS com nº de estações e chuva 24h máxima.
+
+    Alimenta o selectbox de bacias da aba "Bacias RS". Cache 5 min.
+
+    Returns:
+        DcrsBaciasResponse ordenada por nº de estações (desc).
+    """
+    cached = _cache_get("dcrs_bacias", ttl_s=300)
+    if cached:
+        return cached
+
+    rows = _pg_query("""
+        SELECT bacia,
+               COUNT(*)                              AS estacoes,
+               COUNT(rio_nivel)                      AS com_rio,
+               MAX(chuva_24h)                        AS chuva_24h_max
+        FROM   live_dcrs_stations
+        WHERE  bacia IS NOT NULL AND bacia <> ''
+        GROUP  BY bacia
+        ORDER  BY estacoes DESC, bacia
+    """)
+    bacias = [
+        DcrsBaciaItem(
+            bacia         = str(r["bacia"]),
+            estacoes      = int(r["estacoes"]),
+            com_rio       = int(r["com_rio"]),
+            chuva_24h_max = _safe_float(r.get("chuva_24h_max")),
+        )
+        for r in rows
+    ]
+    resp = DcrsBaciasResponse(
+        timestamp = datetime.now(timezone.utc).isoformat(),
+        total     = len(bacias),
+        bacias    = bacias,
+    )
+    _cache_set("dcrs_bacias", resp)
+    return resp
+
+
+@app.get(
+    "/api/v3/dcrs/stations",
+    tags           = ["Bacias RS (Defesa Civil)"],
+    response_model = DcrsStationsResponse,
+    summary        = "Estações DCRS (nível de rio + chuva + met) por bacia",
+)
+async def dcrs_stations(
+    bacia: str | None = Query(None, description="Filtro por bacia (nome exato)"),
+) -> DcrsStationsResponse:
+    """Snapshot das estações da Defesa Civil RS (live_dcrs_stations).
+
+    IMPORTANTE: ``rio_nivel`` está na unidade BRUTA da rede (mista por
+    estação — lagoas em metros, serra aparenta cm). O frontend aplica
+    heurística de exibição sinalizada. Cache 5 min.
+
+    Args:
+        bacia: Nome exato da bacia para filtrar (None = todas).
+
+    Returns:
+        DcrsStationsResponse com estações e lista de bacias presentes.
+    """
+    cache_key = f"dcrs_stations:{bacia or 'all'}"
+    cached = _cache_get(cache_key, ttl_s=300)
+    if cached:
+        return cached
+
+    where  = "WHERE bacia = %s" if bacia else ""
+    params: tuple[Any, ...] = (bacia,) if bacia else ()
+    rows = _pg_query(f"""
+        SELECT codigo, nome, bacia, latitude, longitude,
+               rio_nome, rio_nivel, rio_vazao, rio_tendencia,
+               cota_atencao, cota_alerta, cota_emergencia,
+               chuva_1h, chuva_3h, chuva_6h, chuva_12h, chuva_24h,
+               chuva_48h, chuva_72h, chuva_168h,
+               temperatura, umidade, vento_vel, vento_dir,
+               pressao, senstermica, radiacao, "timestamp"
+        FROM   live_dcrs_stations
+        {where}
+        ORDER  BY bacia, codigo
+    """, params)
+
+    estacoes = [
+        DcrsStation(
+            codigo          = str(r["codigo"]),
+            nome            = r.get("nome"),
+            bacia           = r.get("bacia"),
+            latitude        = _safe_float(r.get("latitude")),
+            longitude       = _safe_float(r.get("longitude")),
+            rio_nome        = r.get("rio_nome"),
+            rio_nivel       = _safe_float(r.get("rio_nivel")),
+            rio_vazao       = _safe_float(r.get("rio_vazao")),
+            rio_tendencia   = _safe_float(r.get("rio_tendencia")),
+            cota_atencao    = _safe_float(r.get("cota_atencao")),
+            cota_alerta     = _safe_float(r.get("cota_alerta")),
+            cota_emergencia = _safe_float(r.get("cota_emergencia")),
+            chuva_1h        = _safe_float(r.get("chuva_1h")),
+            chuva_3h        = _safe_float(r.get("chuva_3h")),
+            chuva_6h        = _safe_float(r.get("chuva_6h")),
+            chuva_12h       = _safe_float(r.get("chuva_12h")),
+            chuva_24h       = _safe_float(r.get("chuva_24h")),
+            chuva_48h       = _safe_float(r.get("chuva_48h")),
+            chuva_72h       = _safe_float(r.get("chuva_72h")),
+            chuva_168h      = _safe_float(r.get("chuva_168h")),
+            temperatura     = _safe_float(r.get("temperatura")),
+            umidade         = _safe_float(r.get("umidade")),
+            vento_vel       = _safe_float(r.get("vento_vel")),
+            vento_dir       = _safe_float(r.get("vento_dir")),
+            pressao         = _safe_float(r.get("pressao")),
+            senstermica     = _safe_float(r.get("senstermica")),
+            radiacao        = _safe_float(r.get("radiacao")),
+            timestamp       = _iso(r.get("timestamp")),
+        )
+        for r in rows
+    ]
+    resp = DcrsStationsResponse(
+        timestamp      = datetime.now(timezone.utc).isoformat(),
+        fonte          = "Rede Hidrometeorológica Defesa Civil RS",
+        total_estacoes = len(estacoes),
+        bacias         = sorted({e.bacia for e in estacoes if e.bacia}),
+        estacoes       = estacoes,
     )
     _cache_set(cache_key, resp)
     return resp

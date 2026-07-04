@@ -69,6 +69,12 @@ jobs:
         continue-on-error: true
         run: python src/collectors/cemaden_collector.py
 
+      # DCRS: Rede Hidrometeorológica da Defesa Civil RS (GraphQL público,
+      # sem auth) — nível de rio POR BACIA + chuva 1h-168h em ~130 estações.
+      - name: Coletar Rede Defesa Civil RS (bacias)
+        continue-on-error: true
+        run: python src/collectors/dcrs_collector.py
+
       # gpm_collector usa earthaccess.login(strategy="netrc") — sem este arquivo
       # o login NASA falha e o coletor cai no fallback CHIRPS (lag de 5-7 semanas)
       - name: Configurar .netrc NASA Earthdata

@@ -22,10 +22,51 @@ CREATE TABLE IF NOT EXISTS stations (
 );
 ALTER TABLE stations DISABLE ROW LEVEL SECURITY;
 -- Fontes aceitas — o check original (INMET/ANA) rejeitava o coletor CEMADEN;
--- recriado em 03/07/2026 incluindo CEMADEN e REDEMET (idempotente).
+-- recriado em 03/07/2026 incluindo CEMADEN/REDEMET e depois DCRS (Defesa
+-- Civil RS). Idempotente.
 ALTER TABLE stations DROP CONSTRAINT IF EXISTS stations_fonte_check;
 ALTER TABLE stations ADD CONSTRAINT stations_fonte_check
-    CHECK (fonte IN ('INMET', 'ANA', 'CEMADEN', 'REDEMET'));
+    CHECK (fonte IN ('INMET', 'ANA', 'CEMADEN', 'REDEMET', 'DCRS'));
+
+-- ── live_dcrs_stations — Rede Hidrometeorológica Defesa Civil RS ──
+-- Snapshot 1 linha/estação DCRS (GraphQL tags_data, ~130 estações, 26
+-- bacias). rio_nivel na unidade BRUTA da rede (mista cm/m por estação —
+-- heurística de exibição no dashboard). Cotas de alarme vêm da própria
+-- API quando definidas (hoje nulas no client público).
+CREATE TABLE IF NOT EXISTS live_dcrs_stations (
+    codigo            TEXT PRIMARY KEY,
+    nome              TEXT,
+    local             TEXT,
+    bacia             TEXT,
+    latitude          DOUBLE PRECISION,
+    longitude         DOUBLE PRECISION,
+    rio_nome          TEXT,
+    rio_nivel         DOUBLE PRECISION,
+    rio_vazao         DOUBLE PRECISION,
+    rio_tendencia     DOUBLE PRECISION,
+    cota_atencao      DOUBLE PRECISION,
+    cota_alerta       DOUBLE PRECISION,
+    cota_emergencia   DOUBLE PRECISION,
+    inundacao_status  DOUBLE PRECISION,
+    chuva_1h          DOUBLE PRECISION,
+    chuva_3h          DOUBLE PRECISION,
+    chuva_6h          DOUBLE PRECISION,
+    chuva_12h         DOUBLE PRECISION,
+    chuva_24h         DOUBLE PRECISION,
+    chuva_48h         DOUBLE PRECISION,
+    chuva_72h         DOUBLE PRECISION,
+    chuva_168h        DOUBLE PRECISION,
+    temperatura       DOUBLE PRECISION,
+    umidade           DOUBLE PRECISION,
+    vento_vel         DOUBLE PRECISION,
+    vento_dir         DOUBLE PRECISION,
+    pressao           DOUBLE PRECISION,
+    senstermica       DOUBLE PRECISION,
+    radiacao          DOUBLE PRECISION,
+    "timestamp"       TIMESTAMPTZ,
+    updated_at        TIMESTAMPTZ DEFAULT NOW()
+);
+ALTER TABLE live_dcrs_stations DISABLE ROW LEVEL SECURITY;
 
 -- ── live_rain_readings — snapshot 1 linha/estação ────────────
 CREATE TABLE IF NOT EXISTS live_rain_readings (
