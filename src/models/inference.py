@@ -38,6 +38,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT / "src"))
 
 from models.dataset_builder import _FEATURE_COLS, _r2_client  # noqa: E402
+from utils.comum import RIOS_LSTM, pg_connect  # noqa: E402
 
 load_dotenv()
 
@@ -54,20 +55,9 @@ _MODEL_CACHE: dict[str, object] = {}
 # Conexão Supabase
 # ---------------------------------------------------------------------------
 
-def _pg_connect() -> Optional["psycopg2.extensions.connection"]:
-    """Abre conexão com o Supabase (pooler IPv4 no Actions).
-
-    Returns:
-        Conexão psycopg2 ou None se as variáveis estiverem ausentes/falharem.
-    """
-    url = os.getenv("SUPABASE_DATABASE_URL_POOLER") or os.getenv("SUPABASE_DATABASE_URL")
-    if not url:
-        return None
-    try:
-        return psycopg2.connect(url, connect_timeout=20)
-    except psycopg2.OperationalError as exc:
-        logger.error(f"Supabase indisponível: {exc}")
-        return None
+def _pg_connect():
+    """Conexão Supabase (canônico em utils.comum)."""
+    return pg_connect(connect_timeout=20)
 
 
 # ---------------------------------------------------------------------------
@@ -317,8 +307,7 @@ def save_forecast(resultado: dict, rio: str = "guaiba") -> bool:
 # Main com guards
 # ---------------------------------------------------------------------------
 
-_RIOS_CONHECIDOS = ["guaiba", "jacui", "taquari", "sinos", "camaqua",
-                    "cai", "ibicui", "ijui", "gravatai", "pardo"]
+_RIOS_CONHECIDOS = RIOS_LSTM   # fonte única em utils.comum
 
 
 def _descobrir_rios() -> list[str]:

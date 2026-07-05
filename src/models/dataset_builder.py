@@ -237,16 +237,12 @@ def _load_cotas_ana(rio_alvo: str, start_year: int) -> pd.DataFrame:
 # Passo C — Complemento recente via R2
 # ---------------------------------------------------------------------------
 
-def _r2_client() -> Optional["boto3.client"]:
-    """Cria cliente boto3 para o R2 (None se variáveis ausentes)."""
-    if not os.getenv("R2_ENDPOINT_URL"):
-        return None
-    return boto3.client(
-        "s3",
-        endpoint_url=os.getenv("R2_ENDPOINT_URL"),
-        aws_access_key_id=os.getenv("R2_ACCESS_KEY_ID"),
-        aws_secret_access_key=os.getenv("R2_SECRET_ACCESS_KEY"),
-    )
+from utils.comum import r2_client as _comum_r2_client  # noqa: E402
+
+
+def _r2_client():
+    """Cliente R2 (canônico em utils.comum) — mantido p/ imports legados."""
+    return _comum_r2_client()
 
 
 def _load_cotas_r2(rio_alvo: str, apos: date) -> pd.DataFrame:

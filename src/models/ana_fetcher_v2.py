@@ -281,55 +281,6 @@ def fetch_serie_telemetrica(cod_estacao: int, dias_busca: int = 30) -> pd.DataFr
 
 
 # ---------------------------------------------------------------------------
-# 4. Reconciliação Taquari/Jacuí
-# ---------------------------------------------------------------------------
-
-def reconciliar_estacoes_taquari_jacui() -> dict[str, Any]:
-    """Compara os códigos hardcoded (ana_fetcher.ESTACOES_RS) com o inventário
-    ativo do Taquari/Jacuí da API REST nova.
-
-    Returns:
-        Dict por rio com: usados (códigos atuais), inativos (usados mas não
-        operando), e disponiveis (estações ativas da bacia não usadas).
-    """
-    from models.ana_fetcher import ESTACOES_RS
-
-    inv = fetch_inventario_estacoes()
-    # Na ANA o rio fica em Rio_Nome; Bacia_Nome é a macro-bacia
-    # ("Atlântico, Trecho Sudeste"), por isso filtramos por Rio_Nome.
-    if inv.empty or "Rio_Nome" not in inv.columns:
-        logger.error("Inventário sem coluna Rio_Nome — não dá para reconciliar.")
-        return {}
-
-    inv["_rio"] = inv["Rio_Nome"].astype(str).str.upper()
-    inv["_cod"] = inv["codigoestacao"].astype(str)
-    tem_telem = "Tipo_Telem" in inv.columns
-    ativos = set(inv["_cod"])
-
-    alvos = {"taquari": "TAQUARI", "jacui": "JACU"}
-    relatorio: dict[str, Any] = {}
-
-    for rio, termo in alvos.items():
-        usados = [str(c) for c in ESTACOES_RS.get(rio, [])]
-        inativos = [c for c in usados if c not in ativos]
-        nrio = inv[inv["_rio"].str.contains(termo, na=False)]
-        # Telemétricas (Tipo_Telem=1) são as melhores candidatas (15 min).
-        candidatas = nrio[~nrio["_cod"].isin(usados)]
-        if tem_telem:
-            candidatas = candidatas[candidatas["Tipo_Telem"].astype(str) == "1"]
-
-        cols = [c for c in ("codigoestacao", "Estacao_Nome", "Municipio_Nome")
-                if c in candidatas.columns]
-        relatorio[rio] = {
-            "usados": usados,
-            "usados_inativos": inativos,
-            "ativos_no_rio": len(nrio),
-            "telemetricas_candidatas": candidatas[cols].head(15).to_dict("records"),
-        }
-    return relatorio
-
-
-# ---------------------------------------------------------------------------
 # 5. Série de rio (REST recente) + fallback SOAP (histórico profundo)
 # ---------------------------------------------------------------------------
 
@@ -361,25 +312,11 @@ def fetch_serie_rio(
     """
     ini = datetime.strptime(data_inicio, "%d/%m/%Y").date()
     fim = datetime.strptime(data_fim, "%d/%m/%Y").date()
-    frames: list[pd.DataFrame] = []
-    janelas_vazias = 0
-    cursor = fim
-    max_janelas = 6  # ~180 dias — teto de segurança (REST só tem ~30)
-
-    for _ in range(max_janelas):
-        if cursor < ini:
-            break
-        df = fetch_serie_telemetrica(cod_estacao, dias_busca=30)
-        if df.empty:
-            janelas_vazias += 1
-            if janelas_vazias >= 1:  # REST esgotou — não insistir (IP block)
-                break
-        else:
-            frames.append(df)
-        cursor = cursor - timedelta(days=30)
-        # A REST sempre retorna a janela mais recente (dias_busca relativo a
-        # hoje), então só faz sentido 1 chamada — quebramos após a primeira.
-        break
+    # A REST telemétrica serve só a janela mais recente (~30 dias relativos a
+    # hoje) — uma única chamada cobre tudo o que existe; janelas antigas
+    # retornam vazio e insistir arrisca bloqueio de IP.
+    df = fetch_serie_telemetrica(cod_estacao, dias_busca=30)
+    frames: list[pd.DataFrame] = [df] if not df.empty else []
 
     if not frames:
         return pd.DataFrame(columns=["data", "cota_m", "vazao_m3s", "chuva_mm"])
@@ -492,37 +429,3 @@ def fetch_rio_com_fallback(
 
 # ---------------------------------------------------------------------------
 # Standalone — só diagnóstico (NÃO sobrescreve ana_fetcher.py)
-# ---------------------------------------------------------------------------
-
-if __name__ == "__main__":
-    try:
-        sys.stdout.reconfigure(encoding="utf-8")
-    except (AttributeError, ValueError):
-        pass
-    logger.remove()
-    logger.add(sys.stderr,
-               format="<green>{time:HH:mm:ss}</green> | <level>{level:<8}</level> | {message}",
-               level="INFO")
-
-    rel = reconciliar_estacoes_taquari_jacui()
-    print("\n" + "=" * 60)
-    print("RELATÓRIO DE RECONCILIAÇÃO — API REST nova vs ana_fetcher.py")
-    print("=" * 60)
-    for rio, d in rel.items():
-        print(f"\n### {rio.upper()} ###")
-        print(f"  Códigos usados hoje: {d['usados']}")
-        if d["usados_inativos"]:
-            print(f"  ⚠ NÃO aparecem como ativos (Operando=1): {d['usados_inativos']}")
-        else:
-            print("  ✓ Todos os códigos usados estão ativos.")
-        print(f"  Estações ativas no rio: {d['ativos_no_rio']}")
-        if d["telemetricas_candidatas"]:
-            print("  Telemétricas ativas NÃO usadas (candidatas a melhorar a bacia):")
-            for e in d["telemetricas_candidatas"]:
-                cod = e.get("codigoestacao", "?")
-                nome = e.get("Estacao_Nome", "")
-                mun = e.get("Municipio_Nome", "")
-                print(f"    {cod} | {nome} ({mun})")
-    print("\n" + "=" * 60)
-    print("DIAGNÓSTICO APENAS — ana_fetcher.py NÃO foi modificado.")
-    print("=" * 60)
