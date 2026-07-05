@@ -102,7 +102,7 @@ RIOS_RS: dict[str, dict] = {
         # 11/06/2026: códigos antigos (87386000/87374000/87392000/87358000)
         # estavam sem telemetria ou desativados — 0 leituras em 30 dias.
         "estacoes": {
-            87382000: {"nome": "São Leopoldo",     "cota_atencao_m": 3.5,
+            87382000: {"nome": "São Leopoldo",     "cota_atencao_m": 3.5, "cota_max_hist_m": 8.64,
                        "cota_alerta_m": 4.5, "cota_emergencia_m": 5.5},
             87380000: {"nome": "Campo Bom",        "cota_atencao_m": 3.5,
                        "cota_alerta_m": 4.5, "cota_emergencia_m": 5.5},
@@ -116,7 +116,7 @@ RIOS_RS: dict[str, dict] = {
         # Muçum 15/17/18 · Encantado 11/13/14. 86720000 Encantado validado
         # em 02/07/2026 (2.780 leituras/30d, cota ao vivo).
         "estacoes": {
-            86510000: {"nome": "Muçum",     "cota_atencao_m": 15.0,
+            86510000: {"nome": "Muçum",     "cota_atencao_m": 15.0, "cota_max_hist_m": 26.11,
                        "cota_alerta_m": 17.0, "cota_emergencia_m": 18.0},
             86720000: {"nome": "Encantado", "cota_atencao_m": 11.0,
                        "cota_alerta_m": 13.0, "cota_emergencia_m": 14.0},
@@ -131,7 +131,7 @@ RIOS_RS: dict[str, dict] = {
         # de ~2 dias) porém do rio certo. Cotas PROVISÓRIAS por percentil da
         # série de treino (P90/P95/P99) — substituir por oficiais (Agente 5).
         "estacoes": {
-            85900000: {"nome": "Rio Pardo (cidade)", "cota_atencao_m": 7.6,
+            85900000: {"nome": "Rio Pardo (cidade)", "cota_atencao_m": 7.6, "cota_max_hist_m": 20.21,
                        "cota_alerta_m": 9.2, "cota_emergencia_m": 11.7},
         },
         "municipios": ["Rio Pardo", "Santa Cruz do Sul", "Cachoeira do Sul"],
@@ -156,7 +156,7 @@ RIOS_RS: dict[str, dict] = {
         # desde 12/06). Substituído por 87905000 Passo do Mendonça (Cristal),
         # telemétrica ativa — mesmo padrão do fix do Sinos.
         "estacoes": {
-            87905000: {"nome": "Passo do Mendonça", "cota_atencao_m": 3.0,
+            87905000: {"nome": "Passo do Mendonça", "cota_atencao_m": 3.0, "cota_max_hist_m": 7.97,
                        "cota_alerta_m": 4.0, "cota_emergencia_m": 5.0},
         },
         "municipios": ["Camaquã", "Cristal"],
@@ -169,21 +169,21 @@ RIOS_RS: dict[str, dict] = {
     # régua ANA (Albatroz) morta desde abr/2024 — observado só via DCRS.
     "Caí": {
         "estacoes": {
-            87170000: {"nome": "Barca do Caí", "cota_atencao_m": 5.3,
+            87170000: {"nome": "Barca do Caí", "cota_atencao_m": 5.3, "cota_max_hist_m": 17.51,
                        "cota_alerta_m": 7.2, "cota_emergencia_m": 11.1},
         },
         "municipios": ["São Sebastião do Caí", "Montenegro", "Feliz"],
     },
     "Ibicuí": {
         "estacoes": {
-            76560000: {"nome": "Manoel Viana", "cota_atencao_m": 6.6,
+            76560000: {"nome": "Manoel Viana", "cota_atencao_m": 6.6, "cota_max_hist_m": 14.84,
                        "cota_alerta_m": 7.8, "cota_emergencia_m": 10.3},
         },
         "municipios": ["Manoel Viana", "Alegrete", "São Vicente do Sul"],
     },
     "Ijuí": {
         "estacoes": {
-            75230000: {"nome": "Santo Ângelo", "cota_atencao_m": 2.7,
+            75230000: {"nome": "Santo Ângelo", "cota_atencao_m": 2.7, "cota_max_hist_m": 7.58,
                        "cota_alerta_m": 3.4, "cota_emergencia_m": 4.6},
         },
         "municipios": ["Santo Ângelo", "Entre-Ijuís", "Ijuí"],
@@ -985,6 +985,7 @@ def coletar_rios_rs(
                 df["cota_atencao_m"]    = est["cota_atencao_m"]
                 df["cota_alerta_m"]     = est["cota_alerta_m"]
                 df["cota_emergencia_m"] = est["cota_emergencia_m"]
+                df["cota_max_hist_m"]   = est.get("cota_max_hist_m")
 
                 if "nivel_m" in df.columns:
                     serie_nivel = df["nivel_m"].dropna()
@@ -1006,6 +1007,7 @@ def coletar_rios_rs(
                             "cota_atencao_m":    est["cota_atencao_m"],
                             "cota_alerta_m":     est["cota_alerta_m"],
                             "cota_emergencia_m": est["cota_emergencia_m"],
+                            "cota_max_hist_m":   est.get("cota_max_hist_m"),
                             "pct_cota_alerta":   round(pct, 1),
                             "flow_m3s":          vazao,
                             "alert_level":       status,

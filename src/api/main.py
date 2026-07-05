@@ -191,6 +191,7 @@ class RioItem(BaseModel):
     cota_atencao_m:    float | None
     cota_alerta_m:     float | None
     cota_emergencia_m: float | None
+    cota_max_hist_m:   float | None = None
     percentual_cota:   float | None
     status:            str
     status_color:      str
@@ -472,7 +473,7 @@ def rivers_status() -> RiversStatusResponse:
     rows = _pg_query("""
         SELECT rio_id, rio_nome, nivel_atual_m,
                cota_atencao_m, cota_alerta_m, cota_emergencia_m,
-               percentual_cota, status, "timestamp"
+               cota_max_hist_m, percentual_cota, status, "timestamp"
         FROM   live_river_levels
         ORDER  BY rio_id
     """)
@@ -487,6 +488,7 @@ def rivers_status() -> RiversStatusResponse:
             cota_atencao_m    = _safe_float(r.get("cota_atencao_m")),
             cota_alerta_m     = _safe_float(r.get("cota_alerta_m")),
             cota_emergencia_m = _safe_float(r.get("cota_emergencia_m")),
+            cota_max_hist_m   = _safe_float(r.get("cota_max_hist_m")),
             percentual_cota   = _safe_float(r.get("percentual_cota")),
             status            = status_str,
             status_color      = _STATUS_COLORS.get(status_str, _STATUS_COLORS["NORMAL"]),

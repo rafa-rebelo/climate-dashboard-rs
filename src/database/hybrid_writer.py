@@ -420,6 +420,7 @@ class HybridWriter:
                         _cota(r, "cota_atencao_m"),
                         _cota(r, "cota_alerta_m"),
                         _cota(r, "cota_emergencia_m"),
+                        float(r["cota_max_hist_m"]) if pd.notna(r.get("cota_max_hist_m")) else None,
                         str(r.get("alert_level") or r.get("status") or "NORMAL"),
                         float(r["pct_cota_alerta"]) if pd.notna(r.get("pct_cota_alerta")) else None,
                         datetime.now(tz=timezone.utc),
@@ -431,7 +432,7 @@ class HybridWriter:
                         INSERT INTO live_river_levels
                             (rio_id, rio_nome, nivel_atual_m, vazao_m3s,
                              cota_atencao_m, cota_alerta_m, cota_emergencia_m,
-                             status, percentual_cota, "timestamp")
+                             cota_max_hist_m, status, percentual_cota, "timestamp")
                         VALUES %s
                         ON CONFLICT (rio_id) DO UPDATE SET
                             rio_nome          = EXCLUDED.rio_nome,
@@ -439,6 +440,7 @@ class HybridWriter:
                             cota_atencao_m    = EXCLUDED.cota_atencao_m,
                             cota_alerta_m     = EXCLUDED.cota_alerta_m,
                             cota_emergencia_m = EXCLUDED.cota_emergencia_m,
+                            cota_max_hist_m   = EXCLUDED.cota_max_hist_m,
                             status            = EXCLUDED.status,
                             percentual_cota   = EXCLUDED.percentual_cota,
                             "timestamp"       = EXCLUDED."timestamp",

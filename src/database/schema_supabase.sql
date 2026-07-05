@@ -108,6 +108,9 @@ CREATE TABLE IF NOT EXISTS live_river_levels (
     "timestamp"       TIMESTAMPTZ,
     updated_at        TIMESTAMPTZ DEFAULT NOW()
 );
+-- Máxima histórica da RÉGUA (validada contra a série de treino em 05/07;
+-- Ibicuí=14,84 e Jacuí/Rio Pardo=20,21 confirmadas por fontes externas).
+ALTER TABLE live_river_levels ADD COLUMN IF NOT EXISTS cota_max_hist_m DOUBLE PRECISION;
 ALTER TABLE live_river_levels DISABLE ROW LEVEL SECURITY;
 
 -- ── live_gpm_precip — grade satélite (PK: lat_lon_key) ───────
