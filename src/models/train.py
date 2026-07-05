@@ -307,7 +307,7 @@ def treinar(args: argparse.Namespace) -> dict[str, Any]:
         "duracao_s": round(time.monotonic() - t0, 1),
         "periodo": periodo,
     }
-    extra: dict[str, Any] = {"periodo_treino": periodo}
+    extra: dict[str, Any] = {"periodo_treino": periodo, "seq_len": args.seq_len}
     if args.rio in _RESSALVAS:
         extra["ressalva"] = _RESSALVAS[args.rio]
         logger.warning(f"RESSALVA [{args.rio}]: {_RESSALVAS[args.rio]}")

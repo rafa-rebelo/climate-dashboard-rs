@@ -108,12 +108,17 @@ def load_weights_from_r2(rio: str = "guaiba"):
 
     payload = torch.load(caminho, map_location="cpu", weights_only=False)
     os.unlink(caminho)
-    hparams = payload.get("hparams") or payload.get("metadata", {}).get("hparams", {})
+    meta = payload.get("metadata", {}) or {}
+    hparams = payload.get("hparams") or meta.get("hparams", {})
     model = RiverLSTM(**hparams)
     model.load_state_dict(payload["state_dict"])
     model.eval()
+    # Janela POR MODELO: treinos novos gravam seq_len no metadata (ex.:
+    # pardo=96). Modelos antigos (sem o campo) usam o padrão 72 — janela
+    # errada degrada a previsão silenciosamente (train/serve skew).
+    model.seq_len_treino = int(meta.get("seq_len", _SEQ_LEN))
     _MODEL_CACHE[f"model_{rio}"] = model
-    logger.info(f"Modelo carregado do R2: {key}")
+    logger.info(f"Modelo carregado do R2: {key} (seq_len={model.seq_len_treino})")
     return model
 
 
@@ -226,7 +231,7 @@ def run_inference(rio: str = "guaiba") -> dict:
     if model is None:
         return {"status": "pendente", "motivo": "modelo ausente no R2"}
 
-    X = get_recent_features(rio)
+    X = get_recent_features(rio, seq_len=getattr(model, "seq_len_treino", _SEQ_LEN))
     if X is None:
         return {"status": "pendente", "motivo": "features indisponíveis"}
 
