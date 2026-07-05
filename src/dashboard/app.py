@@ -843,14 +843,13 @@ def secao_modelo() -> None:
 # Rios monitorados via DCRS (Observado Defesa Civil + Previsão LSTM/ANA)
 # ---------------------------------------------------------------------------
 
-# Rio com modelo LSTM → estação DCRS de referência para o OBSERVADO ao vivo
-# (a mais próxima da régua ANA usada no treino). RÉGUAS DISTINTAS: a previsão
-# é na régua ANA e o observado na régua DCRS (zeros diferentes) — os gráficos
-# usam eixo duplo e comparam TENDÊNCIA, nunca igualdade absoluta.
+# Rio com modelo LSTM cuja régua ANA MORREU (observado só via DCRS).
+# Caí/Ibicuí/Ijuí saíram daqui em 05/07: telemetria ANA ativa na própria
+# régua de treino → entraram no pipeline clássico (RIOS_RS → live_river_levels)
+# com cards padronizados e cotas provisórias por percentil. No Gravataí as
+# RÉGUAS SÃO DISTINTAS: previsão na régua ANA × observado na régua DCRS —
+# gráfico de eixo duplo, comparar TENDÊNCIA.
 _RIOS_DCRS: dict[str, dict[str, str]] = {
-    "cai":      {"nome": "Caí",      "codigo": "DCRS-00012", "estacao": "Montenegro"},
-    "ibicui":   {"nome": "Ibicuí",   "codigo": "DCRS-00103", "estacao": "Manoel Viana"},
-    "ijui":     {"nome": "Ijuí",     "codigo": "DCRS-00130", "estacao": "Ijuí"},
     "gravatai": {"nome": "Gravataí", "codigo": "DCRS-00120", "estacao": "Gravataí"},
 }
 
@@ -972,9 +971,9 @@ def secao_rios() -> None:
             with col:
                 _card_rio(rio, por_rio.get(str(rio["rio_id"]), []), hist)
 
-    # ── Rios novos (onda DCRS): observado Defesa Civil + previsão LSTM ────
+    # ── Gravataí: régua ANA perdida na enchente de mai/24 — observado DCRS ─
     st.markdown("---")
-    st.markdown("#### 🆕 Rios da onda DCRS — observado Defesa Civil + previsão LSTM")
+    st.markdown("#### Gravataí — observado Defesa Civil (régua ANA perdida em mai/2024)")
     st.markdown(f"<div class='muted'>⚖️ {_AVISO_REGUA}</div>", unsafe_allow_html=True)
     dcrs = api_get("/api/v3/dcrs/stations")
     dcrs_df = pd.DataFrame(dcrs.get("estacoes", [])) if _ok(dcrs) else pd.DataFrame()
