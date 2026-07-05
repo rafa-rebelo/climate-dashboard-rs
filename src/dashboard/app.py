@@ -892,7 +892,8 @@ def _grafico_dcrs_ml(obs: pd.DataFrame, previsoes: list[dict], titulo: str) -> N
     fig = go.Figure()
     if not obs.empty:
         fig.add_trace(go.Scatter(x=obs["ts"], y=obs["nivel"], name="Observado (DCRS)",
-                                 mode="lines", line={"color": "rgba(56,189,248,1)", "width": 2},
+                                 mode="lines+markers", marker={"size": 5},
+                                 line={"color": "rgba(56,189,248,1)", "width": 2},
                                  yaxis="y1"))
     if previsoes:
         prev = sorted(previsoes, key=lambda p: p["horizonte_h"])
@@ -1002,7 +1003,9 @@ def _card_rio(rio: dict[str, Any], previsoes: list[dict], hist: dict[str, Any]) 
         f"{_fmt(pct, ' %', 0)} da cota atenção<br>"
         f"<span class='muted'>atenção {_fmt(rio.get('cota_atencao_m'), 'm')} · "
         f"alerta {_fmt(rio.get('cota_alerta_m'), 'm')} · "
-        f"emerg. {_fmt(rio.get('cota_emergencia_m'), 'm')}</span>"
+        f"emerg. {_fmt(rio.get('cota_emergencia_m'), 'm')}"
+        + (f" · máx. hist. {_fmt(rio.get('cota_max_hist_m'), 'm')}"
+           if rio.get('cota_max_hist_m') else "") + "</span>"
         f"<div class='bar-wrap'><div class='bar-fill' "
         f"style='width:{min(float(pct), 100):.0f}%;background:{cor}'></div></div></div>",
         unsafe_allow_html=True,
@@ -1069,8 +1072,12 @@ def _serie_rio(hist: dict[str, Any], rio_id: str) -> pd.DataFrame:
 def _grafico_rio(obs: pd.DataFrame, previsoes: list[dict], rio: dict[str, Any]) -> None:
     fig = go.Figure()
     if not obs.empty:
+        # lines+markers: com 1 ponto só (histórico recém-nascido dos rios
+        # novos), mode="lines" não renderiza nada — o marker garante presença.
         fig.add_trace(go.Scatter(x=obs["ts"], y=obs["nivel"], name="Observado",
-                                 mode="lines", line={"color": "rgba(56,189,248,1)", "width": 2}))
+                                 mode="lines+markers",
+                                 marker={"size": 6},
+                                 line={"color": "rgba(56,189,248,1)", "width": 2}))
     if previsoes:
         previsoes = sorted(previsoes, key=lambda p: p["horizonte_h"])
         base_ts = obs["ts"].iloc[-1] if not obs.empty else pd.Timestamp.now(tz="UTC")
@@ -1088,7 +1095,8 @@ def _grafico_rio(obs: pd.DataFrame, previsoes: list[dict], rio: dict[str, Any]) 
                                  line={"color": "rgba(167,139,250,1)", "width": 2, "dash": "dot"}))
     for chave, label, cor in [("cota_atencao_m", "Atenção", "rgba(245,158,11,0.8)"),
                               ("cota_alerta_m", "Alerta", "rgba(239,68,68,0.8)"),
-                              ("cota_emergencia_m", "Emerg.", "rgba(124,58,237,0.8)")]:
+                              ("cota_emergencia_m", "Emerg.", "rgba(124,58,237,0.8)"),
+                              ("cota_max_hist_m", "Máx. hist.", "rgba(148,163,184,0.55)")]:
         if rio.get(chave):
             fig.add_hline(y=float(rio[chave]), line_dash="dash", line_color=cor,
                           annotation_text=label, annotation_font_color=cor)

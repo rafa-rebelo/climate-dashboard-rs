@@ -95,6 +95,13 @@ _TIMEOUT      = 30     # segundos por request
 _CHUNK_BYTES  = 512 * 1024  # 512 KB
 
 # ── NASA GPM IMERG ────────────────────────────────────────────────────────────
+# load_dotenv ANTES da leitura: sem isso, execução local caía sempre no
+# CHIRPS ("sem credenciais") mesmo com NASA_USER/PASS no .env — no CI o env
+# vem do workflow e mascarava o bug.
+from dotenv import load_dotenv  # noqa: E402
+
+load_dotenv()
+
 _NASA_USER  = os.getenv("NASA_USER", "")
 _NASA_PASS  = os.getenv("NASA_PASS", "")
 _GPM_AUTH   = (_NASA_USER, _NASA_PASS) if _NASA_USER and _NASA_PASS else None
@@ -350,11 +357,14 @@ def _collect_gpm_earthaccess(days_back: int = 1) -> pd.DataFrame:
     start_str = start.strftime("%Y-%m-%d")
     end_str   = end.strftime("%Y-%m-%d")
     try:
+        # count alto: a busca é só metadado. Com count=5 o CMR devolvia os 5
+        # granules mais ANTIGOS da janela (ordem ASC) e o download levava um
+        # dado de ~2 dias — causa da defasagem do heatmap (bug corrigido 05/07).
         results = earthaccess.search_data(
             short_name=_GPM_HALF_HOURLY,
             temporal=(start_str, end_str),
             bounding_box=(_RS_LON_MIN, _RS_LAT_MIN, _RS_LON_MAX, _RS_LAT_MAX),
-            count=5,
+            count=200,
         )
     except Exception as exc:
         logger.warning(f"GPM earthaccess search falhou: {exc}")
@@ -364,11 +374,22 @@ def _collect_gpm_earthaccess(days_back: int = 1) -> pd.DataFrame:
         logger.warning("GPM IMERG: nenhum granule encontrado via earthaccess")
         return pd.DataFrame()
 
-    logger.info(f"GPM IMERG: {len(results)} granules — baixando mais recente via earthaccess...")
+    def _inicio_granule(r: "Any") -> str:
+        """Timestamp inicial do granule (UMM) — chave da ordenação temporal."""
+        try:
+            return r["umm"]["TemporalExtent"]["RangeDateTime"]["BeginningDateTime"]
+        except (KeyError, TypeError):
+            return ""
+
+    mais_novo = sorted(results, key=_inicio_granule)[-1]
+    logger.info(
+        f"GPM IMERG: {len(results)} granules na janela — baixando o mais "
+        f"recente ({_inicio_granule(mais_novo) or 'sem timestamp UMM'})..."
+    )
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         try:
-            files = earthaccess.download(results[:1], local_path=tmp_dir)
+            files = earthaccess.download([mais_novo], local_path=tmp_dir)
         except Exception as exc:
             logger.warning(f"GPM earthaccess download falhou: {exc}")
             return pd.DataFrame()
