@@ -741,6 +741,19 @@ def _painel_dcrs(df: pd.DataFrame, codigo: str) -> None:
         unsafe_allow_html=True,
     )
 
+    # Mini-gráfico Observado × Previsão LSTM quando a bacia tem rio com modelo.
+    rio_modelo = _BACIA_RIO_MODELO.get(str(r.get("bacia") or "").strip())
+    if rio_modelo and pd.notna(r.get("rio_nivel")):
+        fc = api_get("/api/v3/forecasts/rivers", {"rio_id": rio_modelo})
+        validas = [p for p in (fc.get("previsoes", []) if _ok(fc) else [])
+                   if p.get("status") == "ok" and p.get("nivel_previsto_m") is not None]
+        obs = _serie_dcrs(codigo, dias=7)
+        if validas or not obs.empty:
+            _grafico_dcrs_ml(
+                obs, validas,
+                f"Observado ({codigo}) × previsão LSTM do rio {rio_modelo.title()}",
+            )
+
 
 # ---------------------------------------------------------------------------
 # SEÇÃO 4 — Sobre o Modelo ML (transparência didática)
@@ -805,6 +818,13 @@ def secao_modelo() -> None:
             qualidade = ("excelente" if (nmae is not None and nmae < 3)
                          else "boa" if (nmae is not None and nmae < 5)
                          else "homologada" if mae is not None else "—")
+            per = m.get("periodo_treino") or {}
+            periodo_txt = (f"<br>📅 Dados de treino: <b>{per.get('inicio', '?')} → "
+                           f"{per.get('fim', '?')}</b> "
+                           f"({per.get('dias_com_dado', 0):,} dias)".replace(",", ".")
+                           if per else "")
+            ressalva_txt = (f"<br><span style='color:#fcd34d'>⚠️ "
+                            f"{m['ressalva']}</span>" if m.get("ressalva") else "")
             with col:
                 st.markdown(
                     f"<div class='card' style='border-left-color:{cor}'>"
@@ -812,10 +832,117 @@ def secao_modelo() -> None:
                     f"<span style='color:{cor}'>{label}</span><br>"
                     f"📏 Erro típico (1 dia): <b>{_fmt(mae, ' m', 3)}</b>"
                     + (f" &nbsp;·&nbsp; {nmae:.1f}% da faixa do rio" if nmae is not None else "")
-                    + f"<br>🎯 Qualidade: <b>{qualidade}</b><br>"
-                    f"<span class='muted'>treinado em {_fmt_ts(m.get('treinado_em'), '%d/%m/%Y')} · "
+                    + f"<br>🎯 Qualidade: <b>{qualidade}</b>"
+                    + periodo_txt + ressalva_txt +
+                    f"<br><span class='muted'>treinado em {_fmt_ts(m.get('treinado_em'), '%d/%m/%Y')} · "
                     f"última previsão {_fmt_ts(m.get('ultima_inferencia'))}</span></div>",
                     unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------------------------
+# Rios monitorados via DCRS (Observado Defesa Civil + Previsão LSTM/ANA)
+# ---------------------------------------------------------------------------
+
+# Rio com modelo LSTM → estação DCRS de referência para o OBSERVADO ao vivo
+# (a mais próxima da régua ANA usada no treino). RÉGUAS DISTINTAS: a previsão
+# é na régua ANA e o observado na régua DCRS (zeros diferentes) — os gráficos
+# usam eixo duplo e comparam TENDÊNCIA, nunca igualdade absoluta.
+_RIOS_DCRS: dict[str, dict[str, str]] = {
+    "cai":      {"nome": "Caí",      "codigo": "DCRS-00012", "estacao": "Montenegro"},
+    "ibicui":   {"nome": "Ibicuí",   "codigo": "DCRS-00103", "estacao": "Manoel Viana"},
+    "ijui":     {"nome": "Ijuí",     "codigo": "DCRS-00130", "estacao": "Ijuí"},
+    "gravatai": {"nome": "Gravataí", "codigo": "DCRS-00120", "estacao": "Gravataí"},
+}
+
+# Bacia DCRS → rio com modelo LSTM (mini-gráfico no painel das Bacias RS)
+_BACIA_RIO_MODELO: dict[str, str] = {
+    "RS - Rio Caí":          "cai",
+    "RS - Rio Gravataí":     "gravatai",
+    "RS - Rio Ibicuí":       "ibicui",
+    "RS - Rio Ijuí":         "ijui",
+    "RS - Sinos":            "sinos",
+    "RS - Rio Camaquã":      "camaqua",
+    "RS - Rio Taquari-Antas": "taquari",
+    "RS - Lago Guaíba":      "guaiba",
+    "RS - Baixo Jacuí":      "jacui",
+}
+
+_AVISO_REGUA = ("Réguas distintas: observado na régua DCRS (Defesa Civil) e "
+                "previsão na régua ANA do treino — compare tendências, não "
+                "valores absolutos.")
+
+
+def _serie_dcrs(codigo: str, dias: int = 7) -> pd.DataFrame:
+    """Série horária observada de uma estação DCRS via /api/v3/dcrs/history."""
+    h = api_get("/api/v3/dcrs/history", {"codigo": codigo, "dias": dias})
+    if not _ok(h) or not h.get("serie"):
+        return pd.DataFrame()
+    df = pd.DataFrame(h["serie"])
+    df["ts"] = pd.to_datetime(df["ts"], utc=True, errors="coerce")
+    df["nivel"] = df["rio_nivel"].map(_dcrs_nivel_exibicao)
+    return df.dropna(subset=["ts", "nivel"]).sort_values("ts")
+
+
+def _grafico_dcrs_ml(obs: pd.DataFrame, previsoes: list[dict], titulo: str) -> None:
+    """Gráfico eixo-duplo: observado DCRS (y1) × previsão LSTM régua ANA (y2)."""
+    fig = go.Figure()
+    if not obs.empty:
+        fig.add_trace(go.Scatter(x=obs["ts"], y=obs["nivel"], name="Observado (DCRS)",
+                                 mode="lines", line={"color": "rgba(56,189,248,1)", "width": 2},
+                                 yaxis="y1"))
+    if previsoes:
+        prev = sorted(previsoes, key=lambda p: p["horizonte_h"])
+        xs = [pd.to_datetime(p["valid_ts"]) for p in prev]
+        ys = [p["nivel_previsto_m"] for p in prev]
+        lo = [p.get("ic_inferior_m") for p in prev]
+        hi = [p.get("ic_superior_m") for p in prev]
+        if all(v is not None for v in lo + hi):
+            fig.add_trace(go.Scatter(x=xs + xs[::-1], y=hi + lo[::-1], fill="toself",
+                                     fillcolor="rgba(167,139,250,0.18)",
+                                     line={"color": "rgba(0,0,0,0)"}, name="IC 95%",
+                                     hoverinfo="skip", yaxis="y2"))
+        fig.add_trace(go.Scatter(x=xs, y=ys, name="Previsão LSTM (régua ANA)",
+                                 mode="lines+markers",
+                                 line={"color": "rgba(167,139,250,1)", "width": 2, "dash": "dot"},
+                                 yaxis="y2"))
+    fig.update_layout(**PLOTLY_LAYOUT, height=260, title=titulo,
+                      legend={"bgcolor": "rgba(30,41,59,0.5)", "orientation": "h", "y": 1.18},
+                      xaxis={"gridcolor": "rgba(51,65,85,1)"},
+                      yaxis={"title": "DCRS (m)", "gridcolor": "rgba(51,65,85,1)"},
+                      yaxis2={"title": "ANA (m)", "overlaying": "y", "side": "right",
+                              "showgrid": False})
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption(f"⚖️ {_AVISO_REGUA}")
+
+
+def _card_rio_dcrs(rio_id: str, cfg: dict[str, str], dcrs_df: pd.DataFrame,
+                   previsoes: list[dict]) -> None:
+    """Card de rio novo: observado DCRS + previsão LSTM, sem cota oficial."""
+    est = dcrs_df[dcrs_df["codigo"] == cfg["codigo"]] if not dcrs_df.empty else pd.DataFrame()
+    nivel = tend = ts_txt = None
+    if not est.empty:
+        r = est.iloc[0]
+        nivel = _dcrs_nivel_exibicao(r.get("rio_nivel"))
+        tend = r.get("rio_tendencia")
+        ts_txt = _fmt_ts(r.get("timestamp"))
+    seta = "↑" if (tend or 0) > 0 else "↓" if (tend or 0) < 0 else "→"
+    cor = "rgba(148,163,184,1)"   # slate — sem cota oficial, sem status de alerta
+    st.markdown(
+        f"<div class='card' style='border-left-color:{cor}'>"
+        f"<b>{cfg['nome']}</b> 🆕 <span style='color:{cor}'>MONITORADO (DCRS)</span><br>"
+        f"📏 <b>{_fmt(nivel, ' m', 2)}</b> {seta} · estação {cfg['estacao']} "
+        f"({cfg['codigo']})<br>"
+        f"<span class='muted'>cotas oficiais de alerta pendentes (Agente 5) — "
+        f"sem classificação de status · leitura {ts_txt or '—'}</span></div>",
+        unsafe_allow_html=True,
+    )
+    validas = [p for p in previsoes
+               if p.get("status") == "ok" and p.get("nivel_previsto_m") is not None]
+    obs = _serie_dcrs(cfg["codigo"])
+    if not validas and obs.empty:
+        st.caption("Sem série DCRS acumulada ainda (histórico iniciou 04/07/2026).")
+        return
+    _grafico_dcrs_ml(obs, validas, f"{cfg['nome']} — observado DCRS × previsão LSTM")
 
 
 # ---------------------------------------------------------------------------
@@ -844,6 +971,19 @@ def secao_rios() -> None:
         for col, rio in zip(cols, lista[i:i + 2]):
             with col:
                 _card_rio(rio, por_rio.get(str(rio["rio_id"]), []), hist)
+
+    # ── Rios novos (onda DCRS): observado Defesa Civil + previsão LSTM ────
+    st.markdown("---")
+    st.markdown("#### 🆕 Rios da onda DCRS — observado Defesa Civil + previsão LSTM")
+    st.markdown(f"<div class='muted'>⚖️ {_AVISO_REGUA}</div>", unsafe_allow_html=True)
+    dcrs = api_get("/api/v3/dcrs/stations")
+    dcrs_df = pd.DataFrame(dcrs.get("estacoes", [])) if _ok(dcrs) else pd.DataFrame()
+    novos = list(_RIOS_DCRS.items())
+    for i in range(0, len(novos), 2):
+        cols = st.columns(2, gap="medium")
+        for col, (rio_id, cfg) in zip(cols, novos[i:i + 2]):
+            with col:
+                _card_rio_dcrs(rio_id, cfg, dcrs_df, por_rio.get(rio_id, []))
 
 
 def _card_rio(rio: dict[str, Any], previsoes: list[dict], hist: dict[str, Any]) -> None:

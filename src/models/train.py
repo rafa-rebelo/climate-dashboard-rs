@@ -49,6 +49,7 @@ from models.dataset_builder import (  # noqa: E402
     build_dataset,
     create_sequences,
     normalize,
+    save_to_r2,
     split_sequences,
 )
 from models.lstm_river import RiverLSTM, save_model  # noqa: E402
@@ -64,6 +65,22 @@ _HOMOLOG_HORIZONTE_IDX = 0       # 1 dia ≈ "24h" do roadmap
 # o rigor: no Guaíba, 0,20 m ≈ 9% — então 5% é até mais exigente lá.
 _HOMOLOG_NMAE_LIMITE = 0.05      # 5% da faixa de cota
 _HOMOLOG_MAE_LIMITE_M = 0.20     # referência absoluta (só informativa no log)
+
+# Ressalvas de fonte por rio (Agente 5) — persistidas no meta do modelo e
+# expostas na API/dashboard. Definidas no censo ANA×DCRS de 04/07/2026.
+_RESSALVAS: dict[str, str] = {
+    "gravatai": (
+        "Série ANA (Albatroz/Canoas) 2005→abr/2024 e parou — estação "
+        "possivelmente perdida na enchente de mai/2024. Treinado com ~20 anos, "
+        "mas validação recente e costura do presente ficam 100% na régua DCRS "
+        "(zero diferente) → risco de viés maior."
+    ),
+    "pardo": (
+        "Série ANA (Candelária Montante) 2005→jun/2024 e parou — mesmo caso "
+        "do Gravataí. Validação recente e costura 100% na régua DCRS "
+        "(zero diferente) → risco de viés maior."
+    ),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -99,7 +116,14 @@ def _load_dataframe(rio: str, colab: bool) -> pd.DataFrame:
             logger.warning(f"R2 sem dataset pronto ({exc}) — reconstruindo via build_dataset.")
 
     logger.info("Reconstruindo dataset (BigQuery + ANA + R2)...")
-    return build_dataset(rio_alvo=rio, start_year=2000)
+    df = build_dataset(rio_alvo=rio, start_year=2000)
+    # Persiste no R2: a inferência do CI lê treino/{rio}_lstm_dataset_v1.parquet
+    # para montar a janela de features — sem ele o rio fica 'pendente'.
+    try:
+        save_to_r2(df, rio_alvo=rio)
+    except Exception as exc:  # noqa: BLE001 — treino segue mesmo sem upload
+        logger.warning(f"save_to_r2 do dataset falhou ({exc}) — inferência exigirá reenvio.")
+    return df
 
 
 # ---------------------------------------------------------------------------
@@ -271,18 +295,36 @@ def treinar(args: argparse.Namespace) -> dict[str, Any]:
           f"(limite {h['limite_nmae_pct']:.0f}%) → {h['status']}")
 
     # 5. Persistência (R2 via save_model + scaler já salvo pelo normalize)
+    periodo = {
+        "inicio": str(pd.to_datetime(df["data"]).min().date()),
+        "fim":    str(pd.to_datetime(df["data"]).max().date()),
+        "dias_com_dado": int(len(df)),
+    }
     metricas["treino"] = {
         "rio": args.rio, "device": device, "epocas_rodadas": len(hist),
         "melhor_val_loss": round(melhor_val, 6),
         "n_train": len(X_tr), "n_val": len(X_va), "n_test": len(X_te),
         "duracao_s": round(time.monotonic() - t0, 1),
+        "periodo": periodo,
     }
-    try:
-        save_model(model, rio_alvo=args.rio, version="v1",
-                   metrics={"mae_24h_m": h["mae_m"], "nmae_pct": h["nmae_pct"],
-                            "status": h["status"]})
-    except RuntimeError as exc:
-        logger.warning(f"Upload do modelo ao R2 falhou ({exc}) — salvando só local.")
+    extra: dict[str, Any] = {"periodo_treino": periodo}
+    if args.rio in _RESSALVAS:
+        extra["ressalva"] = _RESSALVAS[args.rio]
+        logger.warning(f"RESSALVA [{args.rio}]: {_RESSALVAS[args.rio]}")
+
+    if h["status"] == "APROVADO":
+        try:
+            save_model(model, rio_alvo=args.rio, version="v1",
+                       metrics={"mae_24h_m": h["mae_m"], "nmae_pct": h["nmae_pct"],
+                                "status": h["status"]},
+                       extra=extra)
+        except RuntimeError as exc:
+            logger.warning(f"Upload do modelo ao R2 falhou ({exc}) — salvando só local.")
+    else:
+        # REPROVADO não publica: a inferência do CI descobre qualquer .pt no
+        # R2 e passaria a emitir previsões de um modelo não homologado.
+        logger.error(f"{args.rio}: REPROVADO — modelo NÃO publicado no R2 "
+                     "(fica só em models_saved/ e logs/ para análise).")
 
     # Cópia local dos pesos
     local_pt = _ROOT / "models_saved" / f"{args.rio}_lstm_v1.pt"
@@ -326,7 +368,8 @@ def treinar(args: argparse.Namespace) -> dict[str, Any]:
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Treino RiverLSTM — Monitor RS")
     p.add_argument("--rio", default="guaiba",
-                   choices=["guaiba", "jacui", "taquari", "sinos", "camaqua"])
+                   choices=["guaiba", "jacui", "taquari", "sinos", "camaqua",
+                            "cai", "ibicui", "ijui", "gravatai", "pardo"])
     p.add_argument("--epochs", type=int, default=100)
     p.add_argument("--seq_len", type=int, default=72,
                    help="Janela de entrada em dias (default 72)")

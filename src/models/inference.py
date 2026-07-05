@@ -312,7 +312,8 @@ def save_forecast(resultado: dict, rio: str = "guaiba") -> bool:
 # Main com guards
 # ---------------------------------------------------------------------------
 
-_RIOS_CONHECIDOS = ["guaiba", "jacui", "taquari", "sinos", "camaqua"]
+_RIOS_CONHECIDOS = ["guaiba", "jacui", "taquari", "sinos", "camaqua",
+                    "cai", "ibicui", "ijui", "gravatai", "pardo"]
 
 
 def _descobrir_rios() -> list[str]:
