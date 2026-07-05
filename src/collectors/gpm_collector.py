@@ -25,15 +25,6 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
-# duckdb é só do caminho legado de fallback (_upsert_duckdb), nunca usado
-# em produção (HybridWriter cobre Supabase+R2). Opcional para permitir o
-# requirements-collect.txt enxuto no CI, que não instala duckdb.
-try:
-    import duckdb
-    _DUCKDB_OK = True
-except ImportError:
-    duckdb = None  # type: ignore[assignment]
-    _DUCKDB_OK = False
 
 import numpy as np
 import pandas as pd
@@ -80,7 +71,6 @@ except ImportError:
 # Caminhos e constantes
 # ---------------------------------------------------------------------------
 _ROOT    = Path(__file__).resolve().parents[2]
-_DB_PATH = Path(os.getenv("DB_PATH", str(_ROOT / "data" / "climate.duckdb")))
 _OUT_DIR = _ROOT / "data" / "processed"
 _OUT_DIR.mkdir(parents=True, exist_ok=True)
 _PARQUET = _OUT_DIR / "gpm_precip_1d.parquet"
@@ -591,53 +581,6 @@ def _save_parquet(df: pd.DataFrame) -> None:
         logger.error(f"Erro ao salvar Parquet: {exc}")
 
 
-def _upsert_duckdb(df: pd.DataFrame) -> int:
-    """
-    Cria tabela gpm_precip (se necessário) e faz upsert dos registros.
-
-    Args:
-        df: DataFrame com colunas lat, lon, precip_mm, timestamp, source.
-
-    Returns:
-        Número de linhas inseridas.
-    """
-    if df.empty:
-        return 0
-    if not _DUCKDB_OK:
-        logger.warning("duckdb indisponível — _upsert_duckdb (fallback legado) ignorado.")
-        return 0
-    try:
-        conn = duckdb.connect(str(_DB_PATH))
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS gpm_precip (
-                lat        DOUBLE       NOT NULL,
-                lon        DOUBLE       NOT NULL,
-                precip_mm  FLOAT,
-                timestamp  TIMESTAMPTZ  NOT NULL,
-                source     VARCHAR      DEFAULT 'GPM_IMERG_EARLY',
-                PRIMARY KEY (lat, lon, timestamp)
-            )
-        """)
-        conn.execute(
-            "INSERT OR REPLACE INTO gpm_precip "
-            "SELECT lat, lon, precip_mm, timestamp, source FROM df"
-        )
-        total = conn.execute("SELECT COUNT(*) FROM gpm_precip").fetchone()[0]
-        conn.close()
-        logger.success(f"DuckDB gpm_precip: {total:,} registros totais")
-        return len(df)
-    except duckdb.IOException as exc:
-        logger.warning(f"DuckDB bloqueado — apenas Parquet salvo: {exc}")
-        return 0
-    except Exception as exc:
-        logger.error(f"DuckDB erro: {exc}")
-        return 0
-
-
-# ===========================================================================
-# Orquestrador principal
-# ===========================================================================
-
 def collect_gpm(days_back: int = 1) -> dict[str, int]:
     """
     Executa pipeline de precipitação por satélite para o RS.
@@ -670,7 +613,8 @@ def collect_gpm(days_back: int = 1) -> dict[str, int]:
         upserted = res.pg_rows
     else:
         _save_parquet(df)
-        upserted = _upsert_duckdb(df)
+        upserted = 0
+        logger.warning("HybridWriter indisponível — Parquet local salvo, sem upsert.")
 
     return {"points": len(df), "upserted": upserted, "source": source}
 
@@ -706,7 +650,6 @@ if __name__ == "__main__":
 
     logger.info("=" * 60)
     logger.info("Precipitação Satélite RS")
-    logger.info(f"  DB_PATH : {_DB_PATH}")
     logger.info(f"  NASA    : {'auth OK' if _GPM_AUTH else 'sem credenciais (usará CHIRPS)'}")
     logger.info(f"  rasterio: {'OK' if _RASTERIO_OK else 'FALTANDO'}")
     logger.info("=" * 60)
@@ -715,13 +658,11 @@ if __name__ == "__main__":
         df = collect_gpm_imerg(days_back=args.dias)
         if not df.empty:
             _save_parquet(df)
-            _upsert_duckdb(df)
         result = {"points": len(df), "source": "GPM_IMERG_EARLY"}
     elif args.fonte == "chirps":
         df = collect_chirps()
         if not df.empty:
             _save_parquet(df)
-            _upsert_duckdb(df)
         result = {"points": len(df), "source": "CHIRPS_v2"}
     else:
         result = collect_gpm(days_back=args.dias)

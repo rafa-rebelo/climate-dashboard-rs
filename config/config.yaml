@@ -14,7 +14,6 @@ dados:
   processed: "data/processed"
   forecasts: "data/forecasts"
   geo: "data/geo"
-  db_path: "data/climate.duckdb"
 
 # Frequências de coleta
 coleta:
@@ -22,38 +21,62 @@ coleta:
   qualidade_agua_minutos: 30
   previsao_horas: 6
 
-# Rios críticos do RS com cotas de alerta
+# Rios monitorados — o telegram_bot usa APENAS municipios_risco daqui.
+# As COTAS OFICIAIS ficam POR ESTAÇÃO em src/collectors/ana_collector.RIOS_RS
+# (fonte única desde 03/07/2026) — os valores abaixo são apenas referência
+# informativa e refletem a estação principal de cada rio.
+# Lagoa_Patos removida em 05/07/2026: sem estação telemétrica de nível na ANA.
 rios:
   Sinos:
-    cota_atencao_m: 3.5
+    cota_atencao_m: 3.5      # ref. São Leopoldo 87382000
     cota_alerta_m: 4.5
     cota_emergencia_m: 5.5
-    municipios_risco: ["São Leopoldo", "Novo Hamburgo", "Canoas", "Esteio"]
+    municipios_risco: ["São Leopoldo", "Novo Hamburgo", "Canoas", "Esteio", "Campo Bom"]
   Taquari:
-    cota_atencao_m: 3.5
-    cota_alerta_m: 5.0
-    cota_emergencia_m: 7.0
+    cota_atencao_m: 15.0     # ref. Muçum 86510000 (SGB/Defesa Civil)
+    cota_alerta_m: 17.0
+    cota_emergencia_m: 18.0
     municipios_risco: ["Lajeado", "Estrela", "Encantado", "Muçum", "Roca Sales"]
   Jacuí:
-    cota_atencao_m: 5.0
-    cota_alerta_m: 7.0
-    cota_emergencia_m: 9.0
+    cota_atencao_m: 7.6      # ref. Rio Pardo (cidade) 85900000 — PROVISÓRIA (P90/95/99)
+    cota_alerta_m: 9.2
+    cota_emergencia_m: 11.7
     municipios_risco: ["Rio Pardo", "Santa Cruz do Sul", "Cachoeira do Sul"]
   Guaíba:
-    cota_atencao_m: 2.5
+    cota_atencao_m: 2.5      # ref. oficial Guaíba/POA (observado via baixo Jacuí)
     cota_alerta_m: 3.0
     cota_emergencia_m: 3.6
     municipios_risco: ["Porto Alegre", "Eldorado do Sul", "Guaíba"]
   Camaquã:
-    cota_atencao_m: 3.0
+    cota_atencao_m: 3.0      # ref. Passo do Mendonça 87905000
     cota_alerta_m: 4.0
     cota_emergencia_m: 5.0
-    municipios_risco: ["Camaquã", "São Lourenço do Sul"]
-  Lagoa_Patos:
-    cota_atencao_m: 1.2
-    cota_alerta_m: 1.5
-    cota_emergencia_m: 2.0
-    municipios_risco: ["Pelotas", "Rio Grande"]
+    municipios_risco: ["Camaquã", "São Lourenço do Sul", "Cristal"]
+  Caí:
+    cota_atencao_m: 5.3      # ref. Barca do Caí 87170000 — PROVISÓRIA (P90/95/99)
+    cota_alerta_m: 7.2
+    cota_emergencia_m: 11.1
+    municipios_risco: ["São Sebastião do Caí", "Montenegro", "Feliz", "Bom Princípio"]
+  Ibicuí:
+    cota_atencao_m: 6.6      # ref. Manoel Viana 76560000 — PROVISÓRIA (P90/95/99)
+    cota_alerta_m: 7.8
+    cota_emergencia_m: 10.3
+    municipios_risco: ["Manoel Viana", "Alegrete", "São Vicente do Sul"]
+  Ijuí:
+    cota_atencao_m: 2.7      # ref. Santo Ângelo 75230000 — PROVISÓRIA (P90/95/99)
+    cota_alerta_m: 3.4
+    cota_emergencia_m: 4.6
+    municipios_risco: ["Santo Ângelo", "Entre-Ijuís", "Ijuí"]
+  Gravataí:
+    cota_atencao_m: 1.9      # ref. Albatroz 87406000 — PROVISÓRIA; régua perdida em 2024
+    cota_alerta_m: 2.2
+    cota_emergencia_m: 2.6
+    municipios_risco: ["Gravataí", "Cachoeirinha", "Alvorada", "Canoas"]
+  Pardo:
+    cota_atencao_m: 4.5      # ref. Candelária Montante 85735000 — PROVISÓRIA
+    cota_alerta_m: 5.3
+    cota_emergencia_m: 5.9
+    municipios_risco: ["Candelária", "Vera Cruz", "Rio Pardo"]
 
 # Limiares de alerta por região
 alertas:

@@ -18,7 +18,6 @@ Formato CSV INMET histórico:
 
 from __future__ import annotations
 
-import hashlib
 import io
 import os
 import sys
@@ -33,12 +32,6 @@ _SRC_DIR = Path(__file__).resolve().parent.parent  # src/collectors/.. = src/
 if str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))
 
-try:
-    import duckdb
-    _DUCKDB_AVAIL = True
-except ImportError:
-    duckdb = None  # type: ignore[assignment]
-    _DUCKDB_AVAIL = False
 
 import pandas as pd
 from loguru import logger
@@ -74,7 +67,6 @@ _OUT_PARQUET = _PARQUET_DIR / "inmet_hourly.parquet"
 _INV_PARQUET = _PARQUET_DIR / "inmet_stations_rs.parquet"
 _HIST_PARQUET = _PARQUET_DIR / "inmet_historico_rs.parquet"
 _CACHE_TTL_S = 600   # 10 minutos
-_DB_PATH     = Path(os.getenv("DB_PATH", str(_ROOT / "data" / "climate.duckdb")))
 # Inventário oficial INMET RS (situação Operante/Pane) — fonte: portal INMET,
 # atualizado 03/07/2026. Usado para marcar ativa=false nas estações em Pane
 # (o ZIP histórico segue publicando os CSVs de estações quebradas).
@@ -117,25 +109,7 @@ def _aplicar_situacao_oficial(df_stations: "pd.DataFrame") -> "pd.DataFrame":
 # Utilitários de conversão (módulo-level para uso em todas as funções)
 # ---------------------------------------------------------------------------
 
-def _safe_float(value: object) -> float | None:
-    """
-    Converte valor para float tolerando vírgula decimal, None e -9999.
-
-    Args:
-        value: Qualquer valor recebido de CSV ou API.
-
-    Returns:
-        Float ou None se a conversão falhar.
-    """
-    if value is None:
-        return None
-    s = str(value).strip().replace(",", ".")
-    if s in ("", "null", "NULL", "None", "-9999", "-9999.0", "nan"):
-        return None
-    try:
-        return float(s)
-    except (ValueError, TypeError):
-        return None
+from utils.comum import safe_float as _safe_float  # noqa: E402
 
 
 # Colunas da API → padrão interno
@@ -496,117 +470,6 @@ def coletar_dados_rs(
 
 
 # ---------------------------------------------------------------------------
-# Persistência no DuckDB
-# ---------------------------------------------------------------------------
-
-def upsert_inmet_duckdb(
-    inventario: pd.DataFrame,
-    leituras: pd.DataFrame,
-) -> dict[str, int]:
-    """Insere estações INMET no DuckDB e faz upsert das leituras.
-
-    Insere metadados em `stations` (INSERT OR REPLACE por station_id) e
-    leituras em `rain_readings` (INSERT OR IGNORE por station_id + ts).
-    Usa DuckDB diretamente — sem dependência de ClimateDB.
-
-    Args:
-        inventario: DataFrame do inventário RS (station_id, name, lat, lon, …).
-        leituras: DataFrame de leituras normalizado (station_id, ts, …).
-
-    Returns:
-        Dict com chaves "stations" e "rain_readings" indicando linhas inseridas.
-
-    Raises:
-        duckdb.Error: Se alguma operação DuckDB falhar de modo irrecuperável.
-    """
-    if not _DUCKDB_AVAIL or duckdb is None:
-        logger.warning("  DuckDB não disponível — skip upsert_inmet_duckdb.")
-        return {"stations": 0, "rain_readings": 0}
-
-    try:
-        conn = duckdb.connect(str(_DB_PATH))
-    except duckdb.IOException as exc:
-        logger.warning(f"  DuckDB bloqueado por outro processo — skip upsert: {exc}")
-        return {"stations": 0, "rain_readings": 0}
-
-    n_st = n_rd = 0
-
-    try:
-        # ── Stations ───────────────────────────────────────────────────────
-        for _, row in inventario.iterrows():
-            try:
-                conn.execute("""
-                    INSERT INTO stations
-                        (station_id, name, source, lat, lon, elevation_m,
-                         state, municipality, river, active)
-                    VALUES (?, ?, 'INMET', ?, ?, ?, ?, ?, NULL, ?)
-                    ON CONFLICT (station_id) DO UPDATE SET
-                        name         = excluded.name,
-                        lat          = excluded.lat,
-                        lon          = excluded.lon,
-                        elevation_m  = excluded.elevation_m,
-                        municipality = excluded.municipality,
-                        active       = excluded.active
-                """, [
-                    str(row.get("station_id", "") or ""),
-                    str(row.get("name", "") or ""),
-                    row.get("lat"),
-                    row.get("lon"),
-                    row.get("elevation_m"),
-                    str(row.get("state", "RS") or "RS"),
-                    row.get("municipality"),
-                    bool(row.get("active", True)),
-                ])
-                n_st += 1
-            except duckdb.Error as exc:
-                logger.debug(f"  station {row.get('station_id')}: {exc}")
-
-        conn.commit()
-        logger.info(f"  DuckDB stations: {n_st} estações INMET inseridas/atualizadas")
-
-        # ── Rain readings ──────────────────────────────────────────────────
-        if not leituras.empty:
-            df_rd = leituras.dropna(subset=["station_id", "ts"]).copy()
-            df_rd["source"] = "INMET"
-
-            for _, row in df_rd.iterrows():
-                try:
-                    sid = str(row["station_id"])
-                    ts  = row["ts"]
-                    key = f"INMET:{sid}:{ts}"
-                    rid = int.from_bytes(
-                        hashlib.sha256(key.encode()).digest()[:8], "big"
-                    ) & 0x7FFFFFFFFFFFFFFF
-
-                    conn.execute("""
-                        INSERT OR IGNORE INTO rain_readings
-                            (id, station_id, ts, rain_1h_mm,
-                             temperature, humidity, pressure_hpa,
-                             wind_speed, wind_dir, source)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'INMET')
-                    """, [
-                        rid, sid, ts,
-                        row.get("rain_1h_mm"),
-                        row.get("temperature"),
-                        row.get("humidity"),
-                        row.get("pressure_hpa"),
-                        row.get("wind_speed"),
-                        row.get("wind_dir"),
-                    ])
-                    n_rd += 1
-                except duckdb.Error as exc:
-                    logger.debug(f"  reading {row.get('station_id')} {row.get('ts')}: {exc}")
-
-            conn.commit()
-            logger.info(f"  DuckDB rain_readings: {n_rd} leituras INMET inseridas")
-
-    finally:
-        conn.close()
-
-    return {"stations": n_st, "rain_readings": n_rd}
-
-
-# ---------------------------------------------------------------------------
 # Orquestrador principal
 # ---------------------------------------------------------------------------
 
@@ -621,7 +484,7 @@ def collect_inmet(
     1. Obtém inventário de 98 estações RS (cache 24h em Parquet).
     2. Opcionalmente coleta dados horários (requer IP brasileiro).
     3. Persiste em data/processed/inmet_{stations_rs,hourly}.parquet.
-    4. Faz upsert no DuckDB (stations + rain_readings).
+    4. Persiste via HybridWriter (Supabase + R2).
 
     Args:
         dias_back: 0 = apenas última hora; >0 = histórico dos últimos N dias.
@@ -640,7 +503,6 @@ def collect_inmet(
     t_start = datetime.now(tz=timezone.utc)
     logger.info("=" * 60)
     logger.info("INMET Collector — iniciando coleta RS")
-    logger.info(f"  DB_PATH: {_DB_PATH.resolve()}")
     logger.info("=" * 60)
 
     client = INMETClient()
@@ -670,7 +532,8 @@ def collect_inmet(
             "rain_readings": res_rd.pg_rows if res_rd else 0,
         }
     else:
-        counts = upsert_inmet_duckdb(inventario, leituras)
+        logger.warning("HybridWriter indisponível — contagens zeradas (sem fallback DuckDB).")
+        counts = {"stations": 0, "rain_readings": 0}
 
     duration = (datetime.now(tz=timezone.utc) - t_start).total_seconds()
     logger.info("=" * 60)
@@ -984,7 +847,7 @@ def collect_historico_rs(
             f"| {df_leituras['station_id'].nunique() if not df_leituras.empty else 0} estações"
         )
 
-    # Persistência híbrida: Parquet (CDN) + DuckDB (analytics)
+    # Persistência híbrida (Supabase + R2) via HybridWriter
     if _HW_OK:
         writer = _HybridWriter()
         # Stations primeiro (rain_readings tem FK → stations)
@@ -1009,14 +872,15 @@ def collect_historico_rs(
             df_stations.to_parquet(_INV_PARQUET, index=False)
             df_stations.to_parquet(_RAW_DIR / "inmet_stations_rs.parquet", index=False)
             logger.info(f"  Salvo: {_INV_PARQUET} ({len(df_stations)} estações RS)")
-        counts = upsert_inmet_duckdb(df_stations, df_leituras)
+        logger.warning("HybridWriter indisponível — contagens zeradas (sem fallback DuckDB).")
+        counts = {"stations": 0, "rain_readings": 0}
 
     duration = (datetime.now(tz=timezone.utc) - t0).total_seconds()
     logger.info("=" * 60)
     logger.success(
         f"INMET Histórico — concluído em {duration:.1f}s | "
         f"{counts['stations']} estações | {counts['rain_readings']} leituras "
-        f"{'Supabase' if _HW_OK else 'DuckDB'}"
+        f"{'Supabase' if _HW_OK else 'sem persistência'}"
     )
     logger.info("=" * 60)
 
@@ -1085,13 +949,13 @@ Exemplos:
             from database.hybrid_writer import HybridWriter as _HW
             counts = {"stations": _HW().write_stations(inv, path=_INV_PARQUET).pg_rows, "rain_readings": 0}
         else:
-            counts  = upsert_inmet_duckdb(inv, pd.DataFrame())
+            counts = {"stations": 0, "rain_readings": 0}
         print("\n--- Inventário INMET RS ---")
         print(f"  estacoes:        {len(inv)}")
         n_op = inv["active"].sum() if "active" in inv.columns else len(inv)
         print(f"  operantes:       {n_op}")
         print(f"  salvo em:        {_INV_PARQUET}")
-        print(f"  DuckDB stations: {counts['stations']}")
+        print(f"  stations gravadas: {counts['stations']}")
         sys.exit(0)
 
     result = collect_inmet(

@@ -100,7 +100,8 @@ def _get_pool() -> psycopg2.pool.SimpleConnectionPool:
         if not _PG_URL:
             raise RuntimeError("SUPABASE_DATABASE_URL_POOLER não configurado.")
         _PG_POOL = psycopg2.pool.SimpleConnectionPool(
-            1, 5, _PG_URL, connect_timeout=30
+            1, 5, _PG_URL, connect_timeout=30,
+            options="-c statement_timeout=15000",
         )
     return _PG_POOL
 
@@ -133,30 +134,16 @@ def _pg_query(sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
         pool.putconn(conn)
 
 
+from utils.comum import RIOS_LSTM, safe_float as _safe_float  # noqa: E402
+from utils.comum import r2_client as _comum_r2_client  # noqa: E402
+
+
 def _s3_client() -> Any:
-    """Cria cliente boto3 apontado para o Cloudflare R2.
-
-    Returns:
-        boto3 S3 client configurado para R2.
-    """
-    return boto3.client(
-        "s3",
-        endpoint_url         = os.getenv("R2_ENDPOINT_URL"),
-        aws_access_key_id    = os.getenv("R2_ACCESS_KEY_ID"),
-        aws_secret_access_key= os.getenv("R2_SECRET_ACCESS_KEY"),
-        config               = BotoConfig(connect_timeout=10, read_timeout=60),
-    )
-
-
-def _safe_float(val: Any) -> float | None:
-    """Converte para float ou None se NaN/None."""
-    if val is None:
-        return None
-    try:
-        f = float(val)
-        return None if math.isnan(f) else f
-    except (TypeError, ValueError):
-        return None
+    """Cliente R2 (canônico em utils.comum)."""
+    s3 = _comum_r2_client(connect_timeout=10, read_timeout=60)
+    if s3 is None:
+        raise RuntimeError("R2 não configurado (R2_ENDPOINT_URL/KEYS).")
+    return s3
 
 
 def _iso(val: Any) -> str | None:
@@ -419,7 +406,7 @@ class TrendResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 @app.get("/health", tags=["Sistema"], summary="Health check Supabase + R2")
-async def health() -> JSONResponse:
+def health() -> JSONResponse:
     """Verifica conectividade com Supabase e Cloudflare R2.
 
     Returns:
@@ -470,7 +457,7 @@ async def health() -> JSONResponse:
     response_model = RiversStatusResponse,
     summary        = "Status atual e nível dos rios monitorados",
 )
-async def rivers_status() -> RiversStatusResponse:
+def rivers_status() -> RiversStatusResponse:
     """Retorna nível atual, cotas e status de todos os rios.
 
     Dados de ``live_river_levels``. Cache 5 min.
@@ -524,7 +511,7 @@ async def rivers_status() -> RiversStatusResponse:
     tags    = ["Precipitação"],
     summary = "Grade de precipitação GPM para Folium/Leaflet (GZip)",
 )
-async def weather_heatmap() -> JSONResponse:
+def weather_heatmap() -> JSONResponse:
     """Retorna todos os pontos GPM do RS com precip_mm.
 
     Dados de ``live_gpm_precip``. Cache 10 min. Comprimido via GZip.
@@ -570,7 +557,7 @@ async def weather_heatmap() -> JSONResponse:
     response_model = StationsResponse,
     summary        = "Última leitura de cada estação INMET",
 )
-async def stations_readings(
+def stations_readings(
     station_id: str | None = Query(None, description="Filtro por station_id"),
 ) -> StationsResponse:
     """Retorna a leitura mais recente de cada estação em live_rain_readings.
@@ -655,7 +642,7 @@ async def stations_readings(
     tags    = ["Analítica"],
     summary = "Histórico de dados do R2 por período",
 )
-async def analytics_history(
+def analytics_history(
     days: int = Query(
         30, ge=1, le=90,
         description="Quantidade de dias para trás (1–90)",
@@ -784,7 +771,7 @@ async def analytics_history(
     response_model = ForecastsResponse,
     summary        = "Previsões LSTM de nível dos rios (river_ai_forecasts)",
 )
-async def forecasts_rivers(
+def forecasts_rivers(
     rio_id: str | None = Query(None, description="Filtro por rio_id (ex.: guaiba)"),
     horizonte_h: int | None = Query(
         None, ge=1, le=240, description="Horizonte máximo em horas (vazio = todos)"
@@ -867,7 +854,7 @@ async def forecasts_rivers(
     response_model = WeatherForecastResponse,
     summary        = "Previsão NWP por ponto e horário (timeline Windy)",
 )
-async def forecasts_weather(
+def forecasts_weather(
     horas: int = Query(168, ge=6, le=168, description="Horizonte em horas (até 7 dias)"),
     location: str | None = Query(None, description="Filtro por localidade"),
 ) -> WeatherForecastResponse:
@@ -950,7 +937,7 @@ _IC_AVISO = (
     response_model = ModelInfoResponse,
     summary        = "Metadados dos modelos LSTM (MAE, treino, status)",
 )
-async def forecasts_model_info() -> ModelInfoResponse:
+def forecasts_model_info() -> ModelInfoResponse:
     """Retorna metadados de transparência por modelo LSTM.
 
     Combina: (1) sidecar leve ``models/{rio}_meta.json`` no R2 (MAE, nMAE,
@@ -970,8 +957,7 @@ async def forecasts_model_info() -> ModelInfoResponse:
     if cached:
         return cached
 
-    rios = ["guaiba", "jacui", "taquari", "sinos", "camaqua",
-            "cai", "ibicui", "ijui", "gravatai", "pardo"]
+    rios = list(RIOS_LSTM)
 
     # Última inferência por rio (status real do snapshot).
     infer: dict[str, dict[str, Any]] = {}
@@ -1152,7 +1138,7 @@ def _classifica_tendencia(dias: list[str], valores: list[float],
     response_model = TrendResponse,
     summary        = "Tendência histórica de um rio ou estação (R2)",
 )
-async def analytics_trend(
+def analytics_trend(
     rio_ou_estacao: str = Query(..., description="rio_id (ex.: guaiba) ou station_id (ex.: A801)"),
     dias: int = Query(14, ge=3, le=90, description="Janela histórica em dias (3–90)"),
 ) -> TrendResponse:
@@ -1265,7 +1251,7 @@ async def analytics_trend(
     response_model = DcrsBaciasResponse,
     summary        = "Bacias hidrográficas com estações DCRS (contagens)",
 )
-async def dcrs_bacias() -> DcrsBaciasResponse:
+def dcrs_bacias() -> DcrsBaciasResponse:
     """Lista as bacias da rede DCRS com nº de estações e chuva 24h máxima.
 
     Alimenta o selectbox de bacias da aba "Bacias RS". Cache 5 min.
@@ -1311,7 +1297,7 @@ async def dcrs_bacias() -> DcrsBaciasResponse:
     response_model = DcrsStationsResponse,
     summary        = "Estações DCRS (nível de rio + chuva + met) por bacia",
 )
-async def dcrs_stations(
+def dcrs_stations(
     bacia: str | None = Query(None, description="Filtro por bacia (nome exato)"),
 ) -> DcrsStationsResponse:
     """Snapshot das estações da Defesa Civil RS (live_dcrs_stations).
@@ -1444,7 +1430,7 @@ def _read_r2_dcrs_hourly(dias: int) -> pd.DataFrame:
     response_model = DcrsHistoryResponse,
     summary        = "Série horária observada de uma estação DCRS (R2)",
 )
-async def dcrs_history(
+def dcrs_history(
     codigo: str = Query(..., description="Código da estação (ex.: DCRS-00012)"),
     dias: int = Query(7, ge=1, le=14, description="Janela em dias (1–14)"),
 ) -> DcrsHistoryResponse:

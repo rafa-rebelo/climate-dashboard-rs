@@ -19,12 +19,9 @@ SEM DuckDB. SEM ClimateDB. SEM arquivo .parquet local.
 
 from __future__ import annotations
 
-import hashlib
 import io
 import os
-import struct
 import time
-import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -44,11 +41,10 @@ load_dotenv()
 # que a variável injetada pelo runner do GitHub Actions seja sempre usada.
 # _pg_connect() lê SUPABASE_DATABASE_URL_POOLER > SUPABASE_DATABASE_URL a cada chamada.
 
-# Fluxo B — Cloudflare R2 (R2 não tem o problema de ordem de injeção — ok cachear)
-_R2_ENDPOINT:   str = os.getenv("R2_ENDPOINT_URL",      "")
-_R2_ACCESS_KEY: str = os.getenv("R2_ACCESS_KEY_ID",     "")
-_R2_SECRET_KEY: str = os.getenv("R2_SECRET_ACCESS_KEY", "")
-_R2_BUCKET:     str = os.getenv("R2_BUCKET_NAME",       "climate-data-rs")
+# Bucket lido em runtime (helpers de conexão vivem em utils.comum).
+def _r2_bucket() -> str:
+    """Nome do bucket R2 (env em runtime)."""
+    return os.getenv("R2_BUCKET_NAME", "climate-data-rs")
 
 # ---------------------------------------------------------------------------
 # Importações condicionais
@@ -62,16 +58,6 @@ except ImportError:
     psycopg2 = None           # type: ignore[assignment]
     _PSYCOPG2_AVAIL = False
     logger.warning("psycopg2 não disponível — pip install psycopg2-binary")
-
-try:
-    import boto3
-    import botocore.exceptions as _botocore_exc
-    _BOTO3_AVAIL = True
-except ImportError:
-    boto3 = None              # type: ignore[assignment]
-    _botocore_exc = None      # type: ignore[assignment]
-    _BOTO3_AVAIL = False
-    logger.warning("boto3 não disponível — pip install boto3")
 
 # ---------------------------------------------------------------------------
 # DDL PostgreSQL — criado uma vez por sessão (idempotente)
@@ -126,58 +112,18 @@ class WriteResult:
 # Helpers internos
 # ---------------------------------------------------------------------------
 
-def _rio_slug(name: str) -> str:
-    """Normaliza nome de rio para slug ASCII minúsculo (ex.: 'Guaíba' → 'guaiba').
-
-    Args:
-        name: Nome do rio como retornado pela API ou config.
-
-    Returns:
-        Slug ASCII minúsculo sem acentos (ex.: 'sinos', 'jacui', 'guaiba').
-    """
-    s = unicodedata.normalize("NFD", str(name)).encode("ascii", "ignore").decode("ascii")
-    return s.lower().strip()
-
-
-def _sha256_id(key: str) -> int:
-    """Gera BIGINT determinístico (63 bits) via SHA-256 para uso como PK.
-
-    Args:
-        key: String composta que identifica unicamente o registro.
-
-    Returns:
-        Inteiro positivo de 63 bits compatível com BIGINT signed PostgreSQL.
-    """
-    digest = hashlib.sha256(key.encode()).digest()[:8]
-    return struct.unpack(">Q", digest)[0] & 0x7FFF_FFFF_FFFF_FFFF
-
-
-def _resolve_pg_url() -> str:
-    """Resolve a URL de conexão PostgreSQL lendo os.getenv() em runtime.
-
-    Leitura lazy (não cacheada) garante que variáveis injetadas pelo runner
-    do GitHub Actions após o import do módulo sejam sempre capturadas.
-    Ordem de prioridade: POOLER (IPv4 Session Pooler) > DIRECT (IPv6).
-
-    Returns:
-        URL de conexão PostgreSQL, ou string vazia se nenhuma var configurada.
-    """
-    return (
-        os.getenv("SUPABASE_DATABASE_URL_POOLER")
-        or os.getenv("SUPABASE_DATABASE_URL")
-        or ""
-    )
+# Helpers canônicos em utils.comum — re-exportados aqui porque coletores e
+# processadores historicamente importam de database.hybrid_writer.
+from utils.comum import (  # noqa: E402
+    pg_connect as _comum_pg_connect,
+    r2_client as _comum_r2_client,
+    resolve_pg_url as _resolve_pg_url,
+    rio_slug as _rio_slug,
+)
 
 
 def _pg_host_safe(url: str = "") -> str:
-    """Extrai somente o host da URL (sem senha) para logging.
-
-    Args:
-        url: URL de conexão. Se vazio, resolve via ``_resolve_pg_url()``.
-
-    Returns:
-        Trecho ``@host:port/db`` da URL ou ``<url_vazia>``.
-    """
+    """Trecho @host:porta/db da URL (sem senha) para logging."""
     u = url or _resolve_pg_url()
     if not u:
         return "<url_vazia>"
@@ -185,55 +131,19 @@ def _pg_host_safe(url: str = "") -> str:
     return u[at:] if at != -1 else u[:30] + "…"
 
 
-def _pg_connect() -> "Optional[psycopg2.extensions.connection]":
-    """Abre conexão PostgreSQL lendo as variáveis de ambiente em runtime.
-
-    Resolve a URL a cada chamada (não usa cache de módulo) para garantir que
-    variáveis injetadas pelo GitHub Actions runner após o import sejam usadas.
-    Prioridade: SUPABASE_DATABASE_URL_POOLER > SUPABASE_DATABASE_URL.
-
-    Returns:
-        Conexão psycopg2 aberta com autocommit=False, ou None em falha.
-
-    Raises:
-        Não lança — captura psycopg2.Error internamente.
-    """
+def _pg_connect() -> "Any":
+    """Conexão Supabase (canônico em utils.comum; timeout unificado 15 s)."""
     if not _PSYCOPG2_AVAIL:
         return None
-
-    db_url = _resolve_pg_url()
-    if not db_url:
-        logger.warning("PG: SUPABASE_DATABASE_URL_POOLER e SUPABASE_DATABASE_URL ausentes — skip Fluxo A.")
-        return None
-
-    try:
-        conn = psycopg2.connect(db_url, connect_timeout=10)
-        conn.autocommit = False
-        logger.debug(f"PG conectado: {_pg_host_safe(db_url)}")
-        return conn
-    except psycopg2.Error as exc:
-        logger.warning(f"PG: falha na conexão {_pg_host_safe(db_url)} — {exc}")
-        return None
+    conn = _comum_pg_connect(connect_timeout=15)
+    if conn is not None:
+        logger.debug(f"PG conectado: {_pg_host_safe()}")
+    return conn
 
 
 def _r2_client() -> "Any":
-    """Cria cliente boto3 para Cloudflare R2 (S3-compatible).
-
-    Returns:
-        Cliente boto3.client ou None se boto3 não disponível ou vars ausentes.
-    """
-    if not _BOTO3_AVAIL:
-        return None
-    if not (_R2_ENDPOINT and _R2_ACCESS_KEY and _R2_SECRET_KEY):
-        logger.warning("R2: variáveis R2_ENDPOINT_URL/KEY não configuradas — skip Fluxo B.")
-        return None
-    return boto3.client(
-        "s3",
-        endpoint_url=_R2_ENDPOINT,
-        aws_access_key_id=_R2_ACCESS_KEY,
-        aws_secret_access_key=_R2_SECRET_KEY,
-        region_name="auto",
-    )
+    """Cliente R2 (canônico em utils.comum, env lida em runtime)."""
+    return _comum_r2_client()
 
 
 def _r2_key(fonte: str, now: datetime) -> str:
@@ -282,7 +192,7 @@ def _r2_upload(
         df.to_parquet(buf, index=False, engine="pyarrow", compression="snappy")
         buf.seek(0)
         s3.put_object(
-            Bucket=_R2_BUCKET,
+            Bucket=_r2_bucket(),
             Key=key,
             Body=buf.getvalue(),
             ContentType="application/octet-stream",

@@ -312,12 +312,13 @@ def upsert_accumulated_supabase(df_acc: pd.DataFrame) -> int:
                 FROM (VALUES %s) AS v(station_id, p1, p3, p6, p12, p24, p48, p72, p7d)
                 WHERE l.station_id = v.station_id
             """, rows, page_size=200)
-            atualizadas = cur.rowcount
         conn.commit()
+        # cur.rowcount de execute_values reflete só a ÚLTIMA página (ex.: 84
+        # de 484) — reporta o total enviado, que é o número real de estações.
         logger.success(
-            f"  PG live_rain_readings: 8 janelas de {atualizadas} estações."
+            f"  PG live_rain_readings: 8 janelas de {len(rows)} estações."
         )
-        return int(atualizadas)
+        return len(rows)
     except psycopg2.Error as exc:
         logger.warning(f"  PG acumulados: {exc}")
         conn.rollback()

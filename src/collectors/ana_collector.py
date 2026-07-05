@@ -124,22 +124,25 @@ RIOS_RS: dict[str, dict] = {
         "municipios": ["Lajeado", "Estrela", "Encantado", "Muçum"],
     },
     "Jacuí": {
-        # ATENÇÃO (Agente 5): 86500000 = Passo Carreiro (Guaporé), RIO
-        # CARREIRO — afluente da bacia Taquari-Antas, NÃO o leito do Jacuí.
-        # As telemétricas do leito (Dona Francisca, Cachoeira do Sul,
-        # Charqueadas) estão sem dado. Mantido até decisão de rótulo/estação.
+        # 05/07/2026: 86500000 (Passo Carreiro — RIO CARREIRO, rio errado)
+        # morreu em 04/07 e foi REMOVIDO. Substituído por 85900000 RIO PARDO
+        # (cidade) — leito do médio Jacuí e a MESMA régua usada no treino do
+        # LSTM (série centenária). Telemetria esparsa (~3 leituras/dia, lag
+        # de ~2 dias) porém do rio certo. Cotas PROVISÓRIAS por percentil da
+        # série de treino (P90/P95/P99) — substituir por oficiais (Agente 5).
         "estacoes": {
-            86500000: {"nome": "Passo Carreiro (Rio Carreiro)",
-                       "cota_atencao_m": 5.0,
-                       "cota_alerta_m": 7.0, "cota_emergencia_m": 9.0},
+            85900000: {"nome": "Rio Pardo (cidade)", "cota_atencao_m": 7.6,
+                       "cota_alerta_m": 9.2, "cota_emergencia_m": 11.7},
         },
-        "municipios": ["Rio Pardo", "Santa Cruz do Sul"],
+        "municipios": ["Rio Pardo", "Santa Cruz do Sul", "Cachoeira do Sul"],
     },
     "Guaíba": {
-        # ATENÇÃO (Agente 5): 87010000 Triunfo e 87020000 São Jerônimo são
-        # estações do BAIXO JACUÍ (Rio_Nome=RIO JACUÍ no inventário), usadas
-        # como proxy de montante do Guaíba. A régua oficial do Guaíba (Cais
-        # Mauá/POA) não está na telemetria ANA — pendente definição.
+        # PROXY DOCUMENTADO (Agente 5, reavaliado 05/07/2026): 87010000
+        # Triunfo e 87020000 São Jerônimo são estações do BAIXO JACUÍ na
+        # zona de remanso do delta — proxy de montante do Guaíba. As réguas
+        # próprias do Guaíba seguem inviáveis na telemetria ANA (Ponta dos
+        # Coatis 87500020 sem cota; Cais Mauá 87450004 instável/504).
+        # Cotas 2,5/3,0/3,6 = referência oficial Guaíba/POA.
         "estacoes": {
             87010000: {"nome": "Triunfo (baixo Jacuí)",      "cota_atencao_m": 2.5,
                        "cota_alerta_m": 3.0, "cota_emergencia_m": 3.6},
@@ -935,9 +938,14 @@ def _horas_para_range(horas: int) -> str:
 
 def coletar_rios_rs(
     client: ANAClient,
-    horas_back: int = 72,
+    horas_back: int = 168,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Coleta nível, vazão e chuva dos rios críticos do RS via telemetria.
+
+    Janela padrão de 7 dias (DIAS_7): réguas convencionais-telemetrizadas
+    como Rio Pardo/Jacuí 85900000 reportam a cada 1-3 dias — com 72h elas
+    caíam fora da janela e o snapshot congelava (bug do Jacuí, 04-05/07).
+    O nível usa sempre a ÚLTIMA leitura válida da janela.
 
     Itera sobre todos os rios em RIOS_RS e suas estações, calcula o status
     operacional (NORMAL/ATENCAO/ALERTA/EMERGENCIA) e persiste em Parquet.

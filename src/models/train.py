@@ -367,9 +367,8 @@ def treinar(args: argparse.Namespace) -> dict[str, Any]:
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Treino RiverLSTM — Monitor RS")
-    p.add_argument("--rio", default="guaiba",
-                   choices=["guaiba", "jacui", "taquari", "sinos", "camaqua",
-                            "cai", "ibicui", "ijui", "gravatai", "pardo"])
+    from utils.comum import RIOS_LSTM
+    p.add_argument("--rio", default="guaiba", choices=RIOS_LSTM)
     p.add_argument("--epochs", type=int, default=100)
     p.add_argument("--seq_len", type=int, default=72,
                    help="Janela de entrada em dias (default 72)")

@@ -37,13 +37,17 @@ from tenacity import (
     wait_exponential,
 )
 
+_ROOT = Path(__file__).resolve().parents[2]
+if str(_ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(_ROOT / "src"))
+
 load_dotenv()
 
 # ---------------------------------------------------------------------------
 # Constantes
 # ---------------------------------------------------------------------------
 
-_CONFIG_PATH  = Path(__file__).resolve().parents[2] / "config" / "config.yaml"
+_CONFIG_PATH  = _ROOT / "config" / "config.yaml"
 
 _TELEGRAM_API = "https://api.telegram.org/bot{token}"
 
@@ -67,25 +71,10 @@ _ALERT_STATUSES = ("ALERTA", "EMERGENCIA")
 # Conexão Supabase
 # ---------------------------------------------------------------------------
 
-def _pg_connect() -> Optional["psycopg2.extensions.connection"]:
-    """Abre conexão com o Supabase PostgreSQL.
-
-    Prefere SUPABASE_DATABASE_URL_POOLER (Session Pooler IPv4 — necessário
-    no GitHub Actions, que não tem IPv6) com fallback para a conexão direta.
-
-    Returns:
-        Conexão psycopg2 aberta, ou None se as variáveis não existirem
-        ou a conexão falhar (alertas degradam para no-op, sem crash).
-    """
-    url = os.getenv("SUPABASE_DATABASE_URL_POOLER") or os.getenv("SUPABASE_DATABASE_URL")
-    if not url:
-        logger.warning("SUPABASE_DATABASE_URL(_POOLER) ausente — alertas sem fonte de dados.")
-        return None
-    try:
-        return psycopg2.connect(url, connect_timeout=30)
-    except psycopg2.OperationalError as exc:
-        logger.error(f"Conexão Supabase falhou: {exc}")
-        return None
+def _pg_connect():
+    """Conexão Supabase (canônico em utils.comum)."""
+    from utils.comum import pg_connect
+    return pg_connect(connect_timeout=15)
 
 
 def _query(
