@@ -382,6 +382,20 @@ class DcrsBaciasResponse(BaseModel):
     bacias:    list[DcrsBaciaItem]
 
 
+class DcrsHistoryPoint(BaseModel):
+    ts:        str
+    rio_nivel: float | None      # unidade BRUTA da rede (mista por estação)
+    chuva_1h:  float | None
+
+
+class DcrsHistoryResponse(BaseModel):
+    timestamp: str
+    codigo:    str
+    dias:      int
+    n_pontos:  int
+    serie:     list[DcrsHistoryPoint]
+
+
 class TrendDay(BaseModel):
     data:        str
     precip_mm:   float | None
@@ -1371,6 +1385,109 @@ async def dcrs_stations(
         total_estacoes = len(estacoes),
         bacias         = sorted({e.bacia for e in estacoes if e.bacia}),
         estacoes       = estacoes,
+    )
+    _cache_set(cache_key, resp)
+    return resp
+
+
+def _read_r2_dcrs_hourly(dias: int) -> pd.DataFrame:
+    """Série horária DCRS: 1 snapshot/hora do prefixo historico/live_dcrs.
+
+    O coletor grava um Parquet (~30 KB, todas as estações) por run; para a
+    série basta o mais novo de cada HORA (timestamp na chave). Download em
+    paralelo — mesmo padrão do rain_accumulator/CEMADEN.
+
+    Args:
+        dias: Janela de histórico (1–14).
+
+    Returns:
+        DataFrame concatenado (codigo, timestamp, rio_nivel, chuva_1h, ...).
+    """
+    import re
+    from concurrent.futures import ThreadPoolExecutor
+
+    bucket = os.getenv("R2_BUCKET_NAME", "")
+    s3 = _s3_client()
+    now = datetime.now(timezone.utc)
+
+    por_hora: dict[str, dict[str, Any]] = {}
+    for dback in range(dias + 1):
+        d = now - timedelta(days=dback)
+        prefix = f"historico/live_dcrs/ano={d.year}/mes={d.month:02d}/dia={d.day:02d}/"
+        try:
+            objs = s3.list_objects_v2(Bucket=bucket, Prefix=prefix).get("Contents", [])
+        except ClientError:
+            continue
+        for obj in objs:
+            m = re.search(r"_(\d{8})_(\d{2})\d{4}UTC", obj["Key"])
+            hora = f"{m.group(1)}_{m.group(2)}" if m else obj["Key"]
+            atual = por_hora.get(hora)
+            if atual is None or obj["LastModified"] > atual["LastModified"]:
+                por_hora[hora] = obj
+
+    def _fetch(key: str) -> pd.DataFrame | None:
+        try:
+            raw = s3.get_object(Bucket=bucket, Key=key)["Body"].read()
+            return pd.read_parquet(io.BytesIO(raw))
+        except (ClientError, ValueError, OSError):
+            return None
+
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        frames = [f for f in ex.map(_fetch, [o["Key"] for o in por_hora.values()])
+                  if f is not None and not f.empty]
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
+@app.get(
+    "/api/v3/dcrs/history",
+    tags           = ["Bacias RS (Defesa Civil)"],
+    response_model = DcrsHistoryResponse,
+    summary        = "Série horária observada de uma estação DCRS (R2)",
+)
+async def dcrs_history(
+    codigo: str = Query(..., description="Código da estação (ex.: DCRS-00012)"),
+    dias: int = Query(7, ge=1, le=14, description="Janela em dias (1–14)"),
+) -> DcrsHistoryResponse:
+    """Série de nível/chuva de uma estação DCRS, do arquivo próprio no R2.
+
+    O histórico começa em 04/07/2026 (ativação do coletor) e cresce a cada
+    hora. ``rio_nivel`` na unidade BRUTA da rede. Cache 30 min.
+
+    Args:
+        codigo: Código DCRS da estação.
+        dias:   Janela de histórico.
+
+    Returns:
+        DcrsHistoryResponse com a série horária ordenada por ts.
+    """
+    cache_key = f"dcrs_hist:{codigo}:{dias}"
+    cached = _cache_get(cache_key, ttl_s=1800)
+    if cached:
+        return cached
+
+    df = _read_r2_dcrs_hourly(dias)
+    serie: list[DcrsHistoryPoint] = []
+    if not df.empty and "codigo" in df.columns:
+        sel = df[df["codigo"].astype(str) == codigo].copy()
+        if not sel.empty:
+            sel["_ts"] = pd.to_datetime(sel["timestamp"], utc=True, errors="coerce")
+            sel = (sel.dropna(subset=["_ts"]).sort_values("_ts")
+                   .drop_duplicates(subset="_ts", keep="last"))
+            serie = [
+                DcrsHistoryPoint(
+                    ts        = r["_ts"].isoformat(),
+                    rio_nivel = _safe_float(r.get("rio_nivel")),
+                    chuva_1h  = _safe_float(r.get("chuva_1h")),
+                )
+                for _, r in sel.iterrows()
+            ]
+
+    resp = DcrsHistoryResponse(
+        timestamp = datetime.now(timezone.utc).isoformat(),
+        codigo    = codigo,
+        dias      = dias,
+        n_pontos  = len(serie),
+        serie     = serie,
     )
     _cache_set(cache_key, resp)
     return resp
