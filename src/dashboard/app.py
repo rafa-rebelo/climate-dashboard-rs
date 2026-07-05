@@ -851,6 +851,10 @@ def secao_modelo() -> None:
 # gráfico de eixo duplo, comparar TENDÊNCIA.
 _RIOS_DCRS: dict[str, dict[str, str]] = {
     "gravatai": {"nome": "Gravataí", "codigo": "DCRS-00120", "estacao": "Gravataí"},
+    # Pardo re-homologado em 05/07 (retreino seq_len=96, nMAE 5,0%): régua
+    # ANA de Candelária instável desde 2024 → observado via DCRS Candelária
+    # (mesmo município da régua de treino).
+    "pardo":    {"nome": "Pardo",    "codigo": "DCRS-00124", "estacao": "Candelária"},
 }
 
 # Bacia DCRS → rio com modelo LSTM (mini-gráfico no painel das Bacias RS)
@@ -864,6 +868,7 @@ _BACIA_RIO_MODELO: dict[str, str] = {
     "RS - Rio Taquari-Antas": "taquari",
     "RS - Lago Guaíba":      "guaiba",
     "RS - Baixo Jacuí":      "jacui",
+    "RS - Rio Pardo":        "pardo",
 }
 
 _AVISO_REGUA = ("Réguas distintas: observado na régua DCRS (Defesa Civil) e "
@@ -973,7 +978,7 @@ def secao_rios() -> None:
 
     # ── Gravataí: régua ANA perdida na enchente de mai/24 — observado DCRS ─
     st.markdown("---")
-    st.markdown("#### Gravataí — observado Defesa Civil (régua ANA perdida em mai/2024)")
+    st.markdown("#### Gravataí e Pardo — observado Defesa Civil (réguas ANA perdidas/instáveis desde 2024)")
     st.markdown(f"<div class='muted'>⚖️ {_AVISO_REGUA}</div>", unsafe_allow_html=True)
     dcrs = api_get("/api/v3/dcrs/stations")
     dcrs_df = pd.DataFrame(dcrs.get("estacoes", [])) if _ok(dcrs) else pd.DataFrame()
