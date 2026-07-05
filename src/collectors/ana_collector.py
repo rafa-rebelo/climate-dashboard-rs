@@ -158,6 +158,33 @@ RIOS_RS: dict[str, dict] = {
         },
         "municipios": ["Camaquã", "Cristal"],
     },
+    # ── Onda DCRS (05/07/2026) — mesmas réguas ANA usadas no TREINO do LSTM,
+    # telemetria ativa verificada (2.700+ leituras/30d cada). Cotas
+    # PROVISÓRIAS por percentil da série histórica de treino (P90/P95/P99,
+    # ~20 anos) — SUBSTITUIR pelas cotas oficiais quando o Agente 5 as
+    # homologar (SGB/Defesa Civil municipal). Gravataí fica FORA daqui:
+    # régua ANA (Albatroz) morta desde abr/2024 — observado só via DCRS.
+    "Caí": {
+        "estacoes": {
+            87170000: {"nome": "Barca do Caí", "cota_atencao_m": 5.3,
+                       "cota_alerta_m": 7.2, "cota_emergencia_m": 11.1},
+        },
+        "municipios": ["São Sebastião do Caí", "Montenegro", "Feliz"],
+    },
+    "Ibicuí": {
+        "estacoes": {
+            76560000: {"nome": "Manoel Viana", "cota_atencao_m": 6.6,
+                       "cota_alerta_m": 7.8, "cota_emergencia_m": 10.3},
+        },
+        "municipios": ["Manoel Viana", "Alegrete", "São Vicente do Sul"],
+    },
+    "Ijuí": {
+        "estacoes": {
+            75230000: {"nome": "Santo Ângelo", "cota_atencao_m": 2.7,
+                       "cota_alerta_m": 3.4, "cota_emergencia_m": 4.6},
+        },
+        "municipios": ["Santo Ângelo", "Entre-Ijuís", "Ijuí"],
+    },
 }
 
 
