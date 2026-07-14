@@ -1106,138 +1106,10 @@ def coletar_qualidade_agua_rs(
             f"| R2: {'ok' if res.r2_ok else 'skip'}"
         )
     else:
+        Path("data/raw").mkdir(parents=True, exist_ok=True)
         df_qa.to_parquet("data/raw/water_quality.parquet", index=False)
         logger.success(f"water_quality.parquet — {len(df_qa)} registros.")
     return df_qa
-
-
-def coletar_chuva_rs(
-    client: ANAClient,
-    horas_back: int = 72,
-) -> pd.DataFrame:
-    """Coleta chuva e calcula acumulados 1h/3h/6h/24h/72h por estação.
-
-    Usa o inventário completo (HidroInventarioEstacoes/v1) filtrado por RS
-    para obter todos os códigos de estação, depois coleta via telemetria adotada.
-
-    Args:
-        client: ANAClient autenticado.
-        horas_back: Janela de coleta. Máximo: 720h (30 dias).
-
-    Returns:
-        DataFrame com colunas station_code, rain_1h, rain_3h, rain_6h,
-        rain_24h, rain_72h para cada estação com dados disponíveis.
-    """
-    agora           = datetime.now(timezone.utc).replace(tzinfo=None)
-    range_intervalo = _horas_para_range(horas_back)
-
-    inv_path = Path("data/raw/ana_inventario_rs.parquet")
-    if inv_path.exists():
-        inv = pd.read_parquet(inv_path)
-        logger.info(f"Inventario carregado do cache — {len(inv)} estacoes.")
-    else:
-        inv = client.inventario_estacoes(uf="RS")
-        inv.to_parquet(inv_path, index=False)
-        logger.info(f"Inventario salvo — {len(inv)} estacoes.")
-
-    cod_col = next(
-        (c for c in [
-            "codigoestacao", "CodEstacao", "codEstacao",
-            "Codigo", "station_code",
-        ] if c in inv.columns),
-        inv.columns[0],
-    )
-
-    # O inventário convencional não inclui estações telemétricas (87xxxxx).
-    # Filtra por telemétricas; se nenhuma, usa os códigos conhecidos de RIOS_RS.
-    inv_tel = inv.copy()
-    if "Tipo_Estacao_Telemetrica" in inv_tel.columns:
-        inv_tel = inv_tel[inv_tel["Tipo_Estacao_Telemetrica"] == 1]
-    if "Operando" in inv_tel.columns:
-        inv_tel = inv_tel[inv_tel["Operando"] == 1]
-
-    if len(inv_tel) > 0:
-        codigos = (
-            inv_tel[cod_col]
-            .dropna()
-            .astype(int, errors="ignore")
-            .astype(str)
-            .unique()
-            .tolist()
-        )
-    else:
-        # Fallback: estações telemétricas conhecidas dos rios monitorados
-        codigos = [str(c) for cfg in RIOS_RS.values() for c in cfg["estacoes"]]
-        logger.info("Inventario nao tem telemétricas — usando estacoes de RIOS_RS.")
-
-    logger.info(f"Coletando chuva — {len(codigos)} estacoes telemétricas no RS")
-
-    all_chuva: list[pd.DataFrame] = []
-    for cod in codigos:
-        try:
-            df = client.serie_adotada(int(cod), range_intervalo=range_intervalo)
-            if not df.empty and "chuva_mm" in df.columns:
-                all_chuva.append(df[["timestamp", "station_code", "chuva_mm"]])
-            time.sleep(0.3)
-        except Exception:
-            continue
-
-    if not all_chuva:
-        logger.warning("Nenhum dado de chuva disponivel.")
-        return pd.DataFrame()
-
-    df_all = pd.concat(all_chuva, ignore_index=True)
-    df_all["timestamp"] = pd.to_datetime(df_all["timestamp"])
-
-    periodos = {"1h": 1, "3h": 3, "6h": 6, "24h": 24, "72h": 72}
-    acum: list[dict] = []
-    for cod, grp in df_all.groupby("station_code"):
-        row: dict = {"station_code": cod}
-        for label, h in periodos.items():
-            cutoff = pd.Timestamp(agora - timedelta(hours=h))
-            row[f"rain_{label}"] = float(
-                grp[grp["timestamp"] >= cutoff]["chuva_mm"].sum()
-            )
-        acum.append(row)
-
-    df_acc = pd.DataFrame(acum)
-    df_acc.to_parquet("data/processed/accumulated_rain.parquet", index=False)
-    logger.success(f"accumulated_rain.parquet — {len(df_acc)} estacoes.")
-    return df_acc
-
-
-def coletar_catalogo_rs(client: ANAClient) -> None:
-    """Coleta e salva catálogos de referência: bacias, rios, municípios, etc.
-
-    Deve ser executado uma vez por dia via cron (GitHub Actions).
-    Salva cada catálogo como Parquet em data/raw/.
-
-    Args:
-        client: ANAClient autenticado.
-
-    Raises:
-        OSError: Se data/raw/ não puder ser criado.
-    """
-    Path("data/raw").mkdir(parents=True, exist_ok=True)
-    logger.info("Coletando catalogos de referencia...")
-
-    catalogos: dict[str, any] = {
-        "bacias":     client.listar_bacias,
-        "sub_bacias": client.listar_sub_bacias,
-        "rios":       client.listar_rios,
-        "municipios": client.listar_municipios,
-        "entidades":  client.listar_entidades,
-        "hidrosat":   client.inventario_hidrosat,
-    }
-    for nome, func in catalogos.items():
-        try:
-            df = func()
-            if not df.empty:
-                df.to_parquet(f"data/raw/ana_{nome}.parquet", index=False)
-                logger.success(f"  ana_{nome}.parquet — {len(df)} registros.")
-        except Exception as exc:
-            logger.warning(f"  {nome}: {exc}")
-        time.sleep(0.5)
 
 
 # ── Helpers de log ────────────────────────────────────────────────────────────
@@ -1302,12 +1174,14 @@ if __name__ == "__main__":
         except Exception as exc:
             logger.warning(f"verificar_permissoes indisponivel: {exc}")
 
-    df_serie, df_status = coletar_rios_rs(client,           horas_back=72)
-    df_chuva            = coletar_chuva_rs(client,          horas_back=72)
+    # Janela 168h (7 dias): réguas convencionais-telemetrizadas (ex.: Rio
+    # Pardo/Jacuí) reportam a cada 1-3 dias — 72h as deixava fora da janela.
+    # Chuva ANA removida em 07/2026: redundante (rain_accumulator cobre via
+    # INMET/CEMADEN) e não persistia no Supabase/R2.
+    df_serie, df_status = coletar_rios_rs(client,           horas_back=168)
     df_qa               = coletar_qualidade_agua_rs(client, dias_back=30)
 
     logger.info("Coleta ANA finalizada.")
     logger.info(f"  Registros rios:  {len(df_serie)}")
     logger.info(f"  Rios c/ status:  {len(df_status)}")
-    logger.info(f"  Estacoes chuva:  {len(df_chuva)}")
     logger.info(f"  Registros QA:    {len(df_qa)}")

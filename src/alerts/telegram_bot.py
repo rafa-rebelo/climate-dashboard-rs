@@ -767,8 +767,16 @@ if __name__ == "__main__":
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
 
     if not token or not chat_id:
-        print("ERRO: TELEGRAM_TOKEN e TELEGRAM_CHAT_ID nao definidos no .env")
-        sys.exit(1)
+        # Integração OPCIONAL: sem secrets, pula limpo (exit 0) — igual ao
+        # CEMADEN. Antes fazia sys.exit(1), o que marcava a etapa com X
+        # vermelho no Actions sem nenhum problema real (era so "nao
+        # configurado"). Configure TELEGRAM_TOKEN/CHAT_ID (via @BotFather)
+        # para ativar os alertas.
+        logger.warning(
+            "TELEGRAM_TOKEN/CHAT_ID ausentes — alertas Telegram ignorados "
+            "(integração opcional; configure os secrets para ativar)."
+        )
+        sys.exit(0)
 
     client = TelegramClient(token, chat_id)
 
