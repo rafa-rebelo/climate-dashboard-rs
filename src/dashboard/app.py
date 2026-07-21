@@ -17,13 +17,21 @@ Config: API_BASE_URL (env). Auto-refresh 10 min. Tema dark Slate. Mobile 768px.
 from __future__ import annotations
 
 import os
+import sys
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import httpx
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+
+_SRC = Path(__file__).resolve().parents[1]
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
+from utils.comum import rio_slug as _slug_rio  # noqa: E402
 
 try:
     from streamlit_autorefresh import st_autorefresh
@@ -1020,13 +1028,6 @@ def _card_rio(rio: dict[str, Any], previsoes: list[dict], hist: dict[str, Any]) 
             _grafico_rio(obs, [], rio)
         return
     _grafico_rio(obs, validas, rio)
-
-
-def _slug_rio(nome: Any) -> str:
-    """Normaliza nome de rio para slug ASCII ('Guaíba' → 'guaiba')."""
-    import unicodedata
-    return (unicodedata.normalize("NFD", str(nome))
-            .encode("ascii", "ignore").decode().lower().strip())
 
 
 def _serie_rio(hist: dict[str, Any], rio_id: str) -> pd.DataFrame:
