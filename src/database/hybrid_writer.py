@@ -628,7 +628,26 @@ class HybridWriter:
                                 k_index      = EXCLUDED.k_index,
                                 updated_at   = NOW()
                         """, rows, page_size=500)
+
+                        # Purga previsões VENCIDAS: esta tabela é a camada
+                        # QUENTE (só o que ainda vai acontecer). Sem isso ela
+                        # crescia sem limite — a auditoria de 23/07 achou
+                        # 10.090 linhas vencidas (86% da tabela) desde 11/06.
+                        # O histórico completo permanece no R2
+                        # (historico/forecasts/), então nada se perde. A
+                        # retenção de 2 dias no passado permite comparar
+                        # previsto × observado recente.
+                        cur.execute(
+                            "DELETE FROM forecasts "
+                            "WHERE valid_ts < NOW() - INTERVAL '2 days'"
+                        )
+                        purgadas = cur.rowcount
                     conn.commit()
+                    if purgadas:
+                        logger.info(
+                            f"    PG forecasts: {purgadas:,} previsões vencidas "
+                            "purgadas (histórico preservado no R2)"
+                        )
                     result.pg_rows = len(rows)
                     result.pg_ok = True
                     logger.info(f"    PG forecasts: {result.pg_rows:,} linhas")
